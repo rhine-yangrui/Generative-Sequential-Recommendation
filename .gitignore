@@ -1,0 +1,27 @@
+# Data files
+data/reviews_Beauty_5.json.gz
+data/meta_Beauty.json.gz
+
+# Large embedding file
+embedding/item_llm_embeddings.npy
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Model checkpoints
+checkpoints/
+*.pt
+*.pth
