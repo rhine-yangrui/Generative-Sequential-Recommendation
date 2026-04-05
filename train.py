@@ -25,42 +25,60 @@ from model.generative_rec import build_model, count_parameters
 # ── 超参数 ────────────────────────────────────────────────────────────────
 CONFIG = {
     'maxlen':      50,      # 用户历史最多保留多少个 item
-    'batch_size':  64,
+    'batch_size':  128,     # 滑动窗口后样本量大幅增加，可用更大 batch
     'lr':          1e-3,
-    'num_epochs':  50,
-    'val_every':   5,       # 每隔多少 epoch 跑一次 val 评估
-    'patience':    10,      # early stopping：val loss 连续多少 epoch 不降则停止
+    'num_epochs':  30,      # 样本多了不需要那么多 epoch
+    'val_every':   3,
+    'patience':    10,      # early stopping：val loss 连续多少次不降则停止
 }
 # ─────────────────────────────────────────────────────────────────────────
 
 
 class RecDataset(Dataset):
     """
-    每条样本 = 一个用户的一次预测任务：
-      输入：用户历史序列（前 n-1 个 item）的 token 化结果
-      标签：完整序列（含目标 token），用于计算 CLM loss
+    推荐数据集，支持滑动窗口数据增强。
+
+    augment=True（训练集）：
+      序列 [a, b, c, d] 生成 3 条样本：
+        [a] → b,  [a,b] → c,  [a,b,c] → d
+      约 5-10 倍于原始样本量。
+
+    augment=False（验证集）：
+      每个用户只预测最后一个 item（与测试集评估方式一致）。
 
     训练只对最后 3 个 token（目标 item 的 c1/c2/c3）计算 loss，
-    历史部分的 loss 被 mask 掉，避免干扰。
+    历史部分的 loss 用 -100 mask 掉。
     """
-    def __init__(self, user_seqs, semantic_ids, maxlen=50):
+    def __init__(self, user_seqs, semantic_ids, maxlen=50, augment=True):
         self.samples = []
         skipped = 0
+
         for user, seq in user_seqs.items():
             if len(seq) < 2:
                 skipped += 1
                 continue
-            target_item = seq[-1]
-            if target_item not in semantic_ids:
-                skipped += 1
-                continue
 
-            input_tokens  = seq_to_tokens(seq[:-1], semantic_ids, maxlen)
-            target_tokens = item_to_tokens(semantic_ids[target_item])
-
-            # 完整序列 = 历史 tokens + 目标 tokens
-            full_tokens = input_tokens + target_tokens
-            self.samples.append((full_tokens, len(input_tokens)))
+            if augment:
+                # 滑动窗口：每个位置都生成一条样本
+                for t in range(1, len(seq)):
+                    target_item = seq[t]
+                    if target_item not in semantic_ids:
+                        continue
+                    history      = seq[:t]
+                    input_tokens = seq_to_tokens(history, semantic_ids, maxlen)
+                    target_tokens = item_to_tokens(semantic_ids[target_item])
+                    full_tokens  = input_tokens + target_tokens
+                    self.samples.append((full_tokens, len(input_tokens)))
+            else:
+                # 只预测最后一个 item
+                target_item = seq[-1]
+                if target_item not in semantic_ids:
+                    skipped += 1
+                    continue
+                input_tokens  = seq_to_tokens(seq[:-1], semantic_ids, maxlen)
+                target_tokens = item_to_tokens(semantic_ids[target_item])
+                full_tokens   = input_tokens + target_tokens
+                self.samples.append((full_tokens, len(input_tokens)))
 
         if skipped:
             print(f'  跳过 {skipped} 个样本（序列过短或缺少 semantic_id）')
@@ -77,17 +95,16 @@ def collate_fn(batch):
     将一个 batch 的样本 padding 到相同长度。
 
     input_ids:  (B, max_len)，PAD_TOKEN 填充
-    labels:     (B, max_len)，历史部分 mask 为 -100（不计算 loss），只有目标 3 个 token 计算
+    labels:     (B, max_len)，历史部分 mask 为 -100，只有目标 3 个 token 计算 loss
     """
     token_seqs   = [torch.tensor(tokens, dtype=torch.long) for tokens, _ in batch]
     history_lens = [hist_len for _, hist_len in batch]
 
     input_ids = pad_sequence(token_seqs, batch_first=True, padding_value=PAD_TOKEN)
 
-    # 构造 labels：默认全部 -100（ignore），只把最后 3 个目标 token 置为真实值
     labels = torch.full_like(input_ids, -100)
     for i, (tokens, hist_len) in enumerate(zip(token_seqs, history_lens)):
-        target_start = hist_len          # 目标 token 在序列中的起始位置
+        target_start = hist_len
         target_end   = hist_len + 3
         labels[i, target_start:target_end] = tokens[target_start:target_end]
 
@@ -95,7 +112,6 @@ def collate_fn(batch):
 
 
 def evaluate_val_loss(model, val_loader, device):
-    """计算 val set 的平均 loss（用于 early stopping）。"""
     model.eval()
     total_loss = 0.0
     n_batches  = 0
@@ -121,7 +137,7 @@ def train():
     print(f'使用设备: {device}')
 
     # ── 加载数据 ──────────────────────────────────────────────────────────
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir     = os.path.dirname(os.path.abspath(__file__))
     data         = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
     semantic_ids = np.load(os.path.join(base_dir, 'embedding/semantic_ids.npy'),
                            allow_pickle=True).item()
@@ -131,12 +147,12 @@ def train():
     print(f'训练用户数: {len(train_seqs)},  验证用户数: {len(val_seqs)}')
 
     # ── 构建 Dataset ──────────────────────────────────────────────────────
-    print('构建训练集...')
-    train_dataset = RecDataset(train_seqs, semantic_ids, CONFIG['maxlen'])
+    print('构建训练集（滑动窗口增强）...')
+    train_dataset = RecDataset(train_seqs, semantic_ids, CONFIG['maxlen'], augment=True)
     print(f'  训练样本数: {len(train_dataset)}')
 
     print('构建验证集...')
-    val_dataset = RecDataset(val_seqs, semantic_ids, CONFIG['maxlen'])
+    val_dataset = RecDataset(val_seqs, semantic_ids, CONFIG['maxlen'], augment=False)
     print(f'  验证样本数: {len(val_dataset)}')
 
     train_loader = DataLoader(train_dataset, batch_size=CONFIG['batch_size'],
@@ -147,6 +163,7 @@ def train():
     # ── 模型 ──────────────────────────────────────────────────────────────
     model = build_model().to(device)
     print(f'\n模型参数量: {count_parameters(model) / 1e6:.1f}M')
+    print(f'词表大小: {VOCAB_SIZE}')
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG['lr'], weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -162,7 +179,7 @@ def train():
         model.train()
         total_loss = 0.0
 
-        for step, (input_ids, labels) in enumerate(train_loader):
+        for input_ids, labels in train_loader:
             input_ids = input_ids.to(device)
             labels    = labels.to(device)
 
@@ -171,7 +188,7 @@ def train():
 
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # 梯度裁剪
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             total_loss += loss.item()
@@ -179,7 +196,6 @@ def train():
         scheduler.step()
         avg_train_loss = total_loss / len(train_loader)
 
-        # 定期评估 val loss
         if epoch % CONFIG['val_every'] == 0 or epoch == 1:
             val_loss = evaluate_val_loss(model, val_loader, device)
             print(f'Epoch {epoch:3d}/{CONFIG["num_epochs"]}  '

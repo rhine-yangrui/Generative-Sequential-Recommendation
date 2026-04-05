@@ -1,11 +1,14 @@
 """
 SASRec 训练脚本。与生成式模型使用完全相同的数据划分和评估协议。
 
+评估协议：All-rank Recall@K / NDCG@K（与 TIGER 论文一致）。
+对全量 item 打分，取 top-K，直接看 target 是否在内。
+
 用法：
     python baseline/sasrec_train.py
 
 训练完成后模型保存至 checkpoints/sasrec_best.pt，
-并自动在测试集上输出 HR@K / NDCG@K。
+并自动在测试集上输出 Recall@K / NDCG@K。
 """
 
 import os
@@ -35,9 +38,9 @@ CONFIG = {
     'num_epochs':  200,
     'patience':    20,
     'val_every':   10,
-    'num_neg':     1,     # 训练时每个正样本对应的负样本数（BPR loss）
+    'num_neg':     1,     # BPR loss 每个正样本对应的负样本数
 }
-K_LIST = [1, 5, 10]
+K_LIST = [5, 10]
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────
@@ -56,7 +59,7 @@ class SASRecDataset(Dataset):
             if len(seq) < 2:
                 continue
             interacted = set(seq)
-            input_seq  = seq[:-1][-maxlen:]  # 截断到 maxlen
+            input_seq  = seq[:-1][-maxlen:]
             pos_item   = seq[-1]
             self.samples.append((input_seq, pos_item, interacted))
 
@@ -65,7 +68,6 @@ class SASRecDataset(Dataset):
 
     def __getitem__(self, idx):
         input_seq, pos_item, interacted = self.samples[idx]
-        # 随机采负样本
         neg_items = []
         while len(neg_items) < self.num_neg:
             neg = random.randint(1, self.num_items)
@@ -75,45 +77,53 @@ class SASRecDataset(Dataset):
 
 
 def collate_sasrec(batch):
-    seqs     = [torch.tensor(s, dtype=torch.long) for s, _, _ in batch]
+    seqs      = [torch.tensor(s, dtype=torch.long) for s, _, _ in batch]
     pos_items = torch.tensor([p for _, p, _ in batch], dtype=torch.long)
     neg_items = torch.tensor([n for _, _, n in batch], dtype=torch.long)
     input_ids = pad_sequence(seqs, batch_first=True, padding_value=0)
     return input_ids, pos_items, neg_items
 
 
-# ── 评估 ──────────────────────────────────────────────────────────────────
+# ── 评估（All-rank） ──────────────────────────────────────────────────────
 
-def evaluate_sasrec(model, test_seqs, num_items, device,
-                    maxlen=50, k_list=K_LIST, num_neg=99):
+def evaluate_sasrec_allrank(model, test_seqs, num_items, device,
+                            maxlen=50, k_list=K_LIST):
+    """
+    SASRec All-rank 评估：对全量 item 打分，取 top-K，
+    计算 Recall@K 和 NDCG@K。与 TIGER 论文评估协议一致。
+    """
     model.eval()
-    all_items = set(range(1, num_items + 1))
-    metrics   = {k: {'HR': [], 'NDCG': []} for k in k_list}
+    metrics = {k: {'Recall': [], 'NDCG': []} for k in k_list}
+    max_k   = max(k_list)
+
+    # 全量候选：item_id 1 ~ num_items，shape (1, num_items)
+    all_item_ids = torch.arange(1, num_items + 1,
+                                dtype=torch.long, device=device).unsqueeze(0)
 
     with torch.no_grad():
-        for user, full_seq in tqdm(test_seqs.items(), desc='Evaluating SASRec'):
-            target    = full_seq[-1]
-            history   = full_seq[:-1]
-            interacted = set(full_seq)
+        for user, full_seq in tqdm(test_seqs.items(), desc='Evaluating SASRec (all-rank)'):
+            target  = full_seq[-1]
+            history = full_seq[:-1]
 
-            neg_pool = list(all_items - interacted)
-            if len(neg_pool) < num_neg:
-                continue
-            neg_samples  = random.sample(neg_pool, num_neg)
-            candidates   = [target] + neg_samples  # 100 个候选，target 在第 0 位
-
-            # 构造输入
             input_seq = history[-maxlen:]
             input_ids = torch.tensor(input_seq, dtype=torch.long).unsqueeze(0).to(device)
-            cand_ids  = torch.tensor(candidates, dtype=torch.long).unsqueeze(0).to(device)
 
-            scores = model.predict(input_ids, cand_ids).squeeze(0)  # (100,)
-            ranked = scores.argsort(descending=True).tolist()        # 按得分降序排列的索引
-            rank   = ranked.index(0) + 1                              # target 在第 0 位，找它的排名
+            # 对全量 item 打分 → (num_items,)
+            scores = model.predict(input_ids, all_item_ids).squeeze(0)
+
+            # top-K item IDs（scores[i] 对应 item_id = i+1）
+            _, topk_indices = torch.topk(scores, max_k)
+            topk_items = (topk_indices + 1).tolist()   # 转回 item_id
 
             for k in k_list:
-                metrics[k]['HR'].append(1 if rank <= k else 0)
-                metrics[k]['NDCG'].append(1 / math.log2(rank + 1) if rank <= k else 0)
+                topk = topk_items[:k]
+                if target in topk:
+                    rank = topk.index(target) + 1
+                    metrics[k]['Recall'].append(1)
+                    metrics[k]['NDCG'].append(1 / math.log2(rank + 1))
+                else:
+                    metrics[k]['Recall'].append(0)
+                    metrics[k]['NDCG'].append(0.0)
 
     model.train()
     return {k: {m: np.mean(v) for m, v in mv.items()} for k, mv in metrics.items()}
@@ -156,11 +166,11 @@ def train():
     print(f'SASRec 参数量: {total_params / 1e6:.2f}M')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
-    bpr_loss  = lambda pos_scores, neg_scores: \
-        -torch.log(torch.sigmoid(pos_scores - neg_scores)).mean()
+    bpr_loss  = lambda pos_s, neg_s: \
+        -torch.log(torch.sigmoid(pos_s - neg_s)).mean()
 
     os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
-    best_hr10      = 0.0
+    best_recall10  = 0.0
     patience_count = 0
 
     print(f'\n开始训练，共 {CONFIG["num_epochs"]} epochs\n')
@@ -171,7 +181,6 @@ def train():
             pos_items = pos_items.to(device)
             neg_items = neg_items.to(device)
 
-            # 正负样本拼在一起打分
             candidates = torch.stack([pos_items, neg_items], dim=1)  # (B, 2)
             scores     = model.predict(input_ids, candidates)         # (B, 2)
             pos_scores, neg_scores = scores[:, 0], scores[:, 1]
@@ -186,21 +195,19 @@ def train():
         avg_loss = total_loss / len(train_loader)
 
         if epoch % CONFIG['val_every'] == 0 or epoch == 1:
-            summary = evaluate_sasrec(model, test_seqs, num_items, device,
-                                      CONFIG['maxlen'])
-            hr10 = summary[10]['HR']
+            summary   = evaluate_sasrec_allrank(model, test_seqs, num_items, device,
+                                                CONFIG['maxlen'])
+            recall10  = summary[10]['Recall']
             print(f'Epoch {epoch:3d}  loss={avg_loss:.4f}  '
-                  f'HR@1={summary[1]["HR"]:.4f}  '
-                  f'HR@5={summary[5]["HR"]:.4f}  '
-                  f'HR@10={hr10:.4f}  '
-                  f'NDCG@10={summary[10]["NDCG"]:.4f}')
+                  f'Recall@5={summary[5]["Recall"]:.4f}  NDCG@5={summary[5]["NDCG"]:.4f}  '
+                  f'Recall@10={recall10:.4f}  NDCG@10={summary[10]["NDCG"]:.4f}')
 
-            if hr10 > best_hr10:
-                best_hr10 = hr10
+            if recall10 > best_recall10:
+                best_recall10 = recall10
                 patience_count = 0
                 torch.save(model.state_dict(),
                            os.path.join(base_dir, 'checkpoints/sasrec_best.pt'))
-                print(f'  ✓ 保存最优模型 (HR@10={best_hr10:.4f})')
+                print(f'  ✓ 保存最优模型 (Recall@10={best_recall10:.4f})')
             else:
                 patience_count += 1
                 if patience_count >= CONFIG['patience']:
@@ -210,15 +217,16 @@ def train():
             print(f'Epoch {epoch:3d}  loss={avg_loss:.4f}')
 
     # 最终结果
-    print(f'\n{"="*50}')
-    print(f'  SASRec 最终结果  (best HR@10={best_hr10:.4f})')
-    print(f'{"="*50}')
+    print(f'\n{"="*60}')
+    print(f'  SASRec 最终结果 (All-rank, best Recall@10={best_recall10:.4f})')
+    print(f'  TIGER 论文参考: SASRec Recall@10=0.0605, NDCG@10=0.0318')
+    print(f'{"="*60}')
     model.load_state_dict(torch.load(
         os.path.join(base_dir, 'checkpoints/sasrec_best.pt'),
         map_location=device, weights_only=True))
-    final = evaluate_sasrec(model, test_seqs, num_items, device, CONFIG['maxlen'])
+    final = evaluate_sasrec_allrank(model, test_seqs, num_items, device, CONFIG['maxlen'])
     for k in K_LIST:
-        print(f'  HR@{k:<2} = {final[k]["HR"]:.4f}   NDCG@{k:<2} = {final[k]["NDCG"]:.4f}')
+        print(f'  Recall@{k:<2} = {final[k]["Recall"]:.4f}   NDCG@{k:<2} = {final[k]["NDCG"]:.4f}')
 
 
 if __name__ == '__main__':
