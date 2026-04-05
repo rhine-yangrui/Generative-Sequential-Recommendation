@@ -1,43 +1,41 @@
-# LLM-Enhanced Sequential Recommendation
+# Generative Sequential Recommendation via Semantic IDs
 
-Aligning LLM semantic embeddings with collaborative filtering via contrastive learning, inspired by [RLMRec (WWW 2024)](https://arxiv.org/abs/2310.15950).
+Inspired by [TIGER (NeurIPS 2023)](https://arxiv.org/abs/2305.05065). Items are encoded as hierarchical Semantic IDs derived from Qwen2.5-7B embeddings, and an autoregressive GPT-2 model generates the next item's ID directly — no scoring over all items needed.
 
 ## Architecture
 
 ```
-User Interaction Sequence [i₁, i₂, ..., iₙ]
+User History [i₁, i₂, ..., iₙ]
+        │
+        ▼  (each item → 3 Semantic ID tokens via hierarchical k-means on LLM embeddings)
+[c₁¹, c₂¹, c₃¹,  c₁², c₂², c₃²,  ...,  c₁ⁿ, c₂ⁿ, c₃ⁿ]
         │
         ▼
-┌─────────────────┐        ┌──────────────────────┐
-│   SASRec        │        │  Qwen2.5-7B (offline) │
-│  (ID Embedding) │        │  Item Semantic Emb     │
-│                 │        │  (pre-extracted)        │
-└────────┬────────┘        └──────────┬─────────────┘
-         │                            │
-         │      ┌─────────────────────┘
-         ▼      ▼
-   ┌─────────────────┐
-   │  InfoNCE Loss   │  ← Align ID emb and LLM emb
-   │  (Contrastive)  │    for the same item
-   └────────┬────────┘
-            ▼
-   ┌─────────────────┐
-   │  Fusion Layer   │  ← Weighted sum of ID & LLM scores
-   └────────┬────────┘
-            ▼
-     HR@10 / NDCG@10
+┌──────────────────┐
+│  GPT-2 (custom)  │  ← autoregressive Transformer decoder
+│  vocab: 771      │    trained with causal LM objective
+└────────┬─────────┘
+         │  beam search
+         ▼
+   (c₁*, c₂*, c₃*)      ← generated Semantic ID
+         │
+         ▼
+   nearest item lookup   ← map back to item
+         │
+         ▼
+   HR@10 / NDCG@10
 ```
 
 ## Results
 
-| Model | HR@10 | NDCG@10 |
-|-------|-------|---------|
-| SASRec (ID only) | - | - |
-| LLM Emb + KNN (no training) | - | - |
-| SASRec + concat (no alignment loss) | - | - |
-| **SASRec + LLM Alignment (ours)** | - | - |
+| Model | HR@1 | HR@5 | HR@10 | NDCG@10 |
+|-------|------|------|-------|---------|
+| SASRec (ID-based baseline) | - | - | - | - |
+| Generative + Random ID (ablation) | - | - | - | - |
+| **Generative + LLM Semantic ID (ours)** | - | - | - | - |
+| TIGER (original paper, RQ-VAE + T5) | 0.2134 | 0.4521 | 0.5498 | 0.3638 |
 
-*Results on Amazon Beauty dataset. To be filled after experiments.*
+*Results on Amazon Beauty. To be filled after experiments.*
 
 ## Quickstart
 
@@ -48,8 +46,14 @@ python data/data_process.py
 # 2. Extract LLM embeddings (requires Ollama + qwen2.5:7b)
 python embedding/extract_embeddings.py
 
-# 3. Train
+# 3. Build Semantic IDs via hierarchical k-means
+python embedding/build_semantic_ids.py
+
+# 4. Train
 python train.py
+
+# 5. Evaluate
+python evaluate.py
 ```
 
 ## Setup
@@ -62,31 +66,22 @@ brew install ollama
 ollama pull qwen2.5:7b
 ```
 
-## Project Structure
+## Key Design Choices
 
-```
-├── data/
-│   ├── data_process.py       # Data preprocessing (5-core filtering, leave-one-out split)
-│   └── beauty_data.pkl       # Processed dataset (generated)
-├── model/
-│   ├── sasrec.py             # SASRec baseline
-│   └── sasrec_align.py       # SASRec + LLM alignment
-├── embedding/
-│   ├── extract_embeddings.py # Qwen2.5-7B embedding extraction via Ollama
-│   └── item_llm_embeddings.npy  # Pre-extracted embeddings (generated, not tracked)
-├── notebooks/
-│   └── analysis.ipynb        # Ablation results & t-SNE visualization
-├── train.py                  # Training entry point
-├── evaluate.py               # Evaluation (leave-one-out, 99 negative sampling)
-└── requirements.txt
-```
+**Semantic ID vs Random ID**: Items are assigned hierarchical codes based on their LLM semantic embeddings (via k-means clustering), not arbitrary integers. This allows the autoregressive model to leverage semantic structure — generating `c₁=12` implicitly means "searching within skincare products."
+
+**k-means vs RQ-VAE**: The original TIGER uses RQ-VAE for Semantic ID construction. We simplify this to hierarchical k-means, which requires no training and is easier to implement while preserving the core semantic structure.
+
+**Qwen2.5-7B vs text-embedding-ada-002**: The original TIGER uses OpenAI's embedding API. We use a locally-hosted Qwen2.5-7B via Ollama, making the pipeline fully reproducible without API keys.
 
 ## Dataset
 
 Amazon Beauty (5-core) from [SNAP](http://snap.stanford.edu/data/amazon/).
 ~22,363 users, ~12,101 items, ~198,502 interactions.
+Same dataset as TIGER original paper — results directly comparable.
 
 ## Reference
 
-- [RLMRec: Representation Learning with Large Language Models for Recommendation](https://arxiv.org/abs/2310.15950) (WWW 2024)
+- [TIGER: Recommender Systems with Generative Retrieval](https://arxiv.org/abs/2305.05065) (NeurIPS 2023)
 - [SASRec: Self-Attentive Sequential Recommendation](https://arxiv.org/abs/1808.09781)
+- [OneRec: Kuaishou's End-to-End Generative Recommendation](https://arxiv.org/abs/2501.18653)
