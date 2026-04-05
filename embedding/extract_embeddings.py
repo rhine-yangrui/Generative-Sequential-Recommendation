@@ -28,13 +28,15 @@ if __name__ == '__main__':
 
     data = pickle.load(open(data_path, 'rb'))
 
+    MODEL = 'nomic-embed-text'
+
     # 先检查 Ollama 是否可用
     try:
-        test_resp = ollama.embeddings(model='qwen2:7b', prompt='test')
+        test_resp = ollama.embeddings(model=MODEL, prompt='test')
         print(f"Ollama 连接成功，embedding 维度: {len(test_resp['embedding'])}")
     except Exception as e:
         print(f"Ollama 连接失败: {e}")
-        print("请确保已运行: ollama serve 并已拉取模型: ollama pull qwen2:7b")
+        print(f"请确保已运行: ollama serve 并已拉取模型: ollama pull {MODEL}")
         exit(1)
 
     # 断点续传：如果已有部分结果则继续
@@ -54,7 +56,7 @@ if __name__ == '__main__':
         if item_id is None:
             continue
         try:
-            resp = ollama.embeddings(model='qwen2:7b', prompt=build_item_prompt(meta))
+            resp = ollama.embeddings(model=MODEL, prompt=build_item_prompt(meta))
             embeddings[item_id] = np.array(resp['embedding'])
         except Exception as e:
             failed += 1
@@ -68,4 +70,4 @@ if __name__ == '__main__':
     np.save(output_path, embeddings)
     print(f"\nDone: {len(embeddings)} items，失败: {failed} 个")
     print(f"已保存至 {output_path}")
-    # 预期：~10 分钟，12,101 个 item，embedding 维度 3584
+    # 预期：~10-15 分钟，12,101 个 item，embedding 维度 768（nomic-embed-text）
