@@ -2,7 +2,7 @@
 生成式推荐模型：基于 GPT-2 架构，从头训练（不加载预训练权重）。
 
 输入：用户历史行为的 Semantic ID token 序列
-      [BOS, c1¹, c2¹+4, c3¹+36,  c1², c2²+4, c3²+36,  ...]
+      [BOS, c1¹, c2¹+4, c3¹+68,  c1², c2²+4, c3²+68,  ...]
 输出：下一个 item 的 Semantic ID token (c1, c2+256, c3+512)
 """
 
@@ -26,7 +26,7 @@ def build_model(n_embd=256, n_layer=4, n_head=4):
         GPT2LMHeadModel，未初始化权重（随机）
     """
     config = GPT2Config(
-        vocab_size=VOCAB_SIZE,   # 295 (4+32+256+3)
+        vocab_size=VOCAB_SIZE,   # 327 (4+64+256+3)
         n_embd=n_embd,
         n_layer=n_layer,
         n_head=n_head,
