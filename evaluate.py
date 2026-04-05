@@ -1,6 +1,9 @@
 """
 评估脚本：Leave-one-out + 99 负采样，计算 HR@K / NDCG@K。
-与 TIGER 论文评估协议完全一致。
+与 SASRec 原论文（ICDM 2018）评估协议一致。
+
+注：TIGER 原论文使用 all-rank 协议（对全量 item 排序，指标为 Recall@K），
+与本脚本的 99 负采样协议不同，两套协议的数字不可混用。
 
 用法：
     python evaluate.py
@@ -19,7 +22,7 @@ from model.inference import build_reverse_index, predict_topk
 from model.tokenizer import seq_to_tokens
 
 K_LIST = [1, 5, 10]
-NUM_NEG = 99   # 负样本数，与 TIGER 论文一致
+NUM_NEG = 99   # 负样本数，与 SASRec 原论文一致（99 负样本 + 1 正样本 = 100 候选）
 
 
 def compute_metrics(ranked_list, target, k_list):
@@ -114,17 +117,15 @@ def print_results(summary, model_name='Our Model'):
         print(f'  {k:>4}  {summary[k]["HR"]:>8.4f}  {summary[k]["NDCG"]:>8.4f}')
     print(f'{"="*55}')
 
-    # 与 TIGER 论文对比
-    tiger_ref = {1: 0.2134, 5: 0.4521, 10: 0.5498}
-    sasrec_ref = {1: 0.1542, 5: 0.3684, 10: 0.4754}
-    print(f'\n  参考（TIGER 原论文，Amazon Beauty）:')
-    print(f'  {"K":>4}  {"SASRec HR":>10}  {"TIGER HR":>10}')
+    # 与 SASRec 原论文参考数字对比（99 负采样协议，Amazon Beauty）
+    sasrec_ref = {1: 0.1542, 5: 0.3684, 10: 0.4854}
+    print(f'\n  参考（SASRec 原论文，99 负采样，Amazon Beauty）:')
+    print(f'  {"K":>4}  {"SASRec HR":>10}')
     for k in sorted(summary.keys()):
         our  = summary[k]['HR']
         sas  = sasrec_ref.get(k, '-')
-        tig  = tiger_ref.get(k, '-')
         flag = '✅' if isinstance(sas, float) and our > sas else '  '
-        print(f'  {k:>4}  {sas:>10.4f}  {tig:>10.4f}  ← ours={our:.4f} {flag}')
+        print(f'  {k:>4}  {sas:>10.4f}  ← ours={our:.4f} {flag}')
 
 
 if __name__ == '__main__':

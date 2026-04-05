@@ -55,7 +55,7 @@ Amazon Beauty, leave-one-out evaluation, 99 random negatives per user (same as T
 | Generative + Random Semantic ID (ablation) | - | - | - | - |
 | **Generative + LLM Semantic ID — Round 1** (nomic-embed-text) | 0.0370 | 0.0755 | 0.1209 | 0.0706 |
 | **Generative + LLM Semantic ID — Round 2** (qwen2:7b) | ? | ? | ? | ? |
-| TIGER (original paper, RQ-VAE + T5) | 0.2134 | 0.4521 | 0.5498 | 0.3638 |
+| TIGER (original paper, all-rank, Recall@K) | — | — | 0.0648 | 0.0384 |
 
 ---
 
