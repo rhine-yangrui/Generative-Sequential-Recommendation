@@ -28,6 +28,8 @@ if __name__ == '__main__':
 
     data = pickle.load(open(data_path, 'rb'))
 
+    # 当前使用轻量 embedding 模型，可替换为更大的 LLM（如 qwen2.5:7b）以提升语义质量
+    # 换模型只需改这一行，其余代码不用动
     MODEL = 'nomic-embed-text'
 
     # 先检查 Ollama 是否可用
