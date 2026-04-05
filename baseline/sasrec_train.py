@@ -1,0 +1,225 @@
+"""
+SASRec 训练脚本。与生成式模型使用完全相同的数据划分和评估协议。
+
+用法：
+    python baseline/sasrec_train.py
+
+训练完成后模型保存至 checkpoints/sasrec_best.pt，
+并自动在测试集上输出 HR@K / NDCG@K。
+"""
+
+import os
+import math
+import random
+import pickle
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pad_sequence
+from tqdm import tqdm
+
+from baseline.sasrec import SASRec
+
+CONFIG = {
+    'maxlen':      50,
+    'hidden_size': 64,
+    'num_layers':  2,
+    'num_heads':   1,
+    'dropout':     0.2,
+    'lr':          1e-3,
+    'batch_size':  256,
+    'num_epochs':  200,
+    'patience':    20,
+    'val_every':   10,
+    'num_neg':     1,     # 训练时每个正样本对应的负样本数（BPR loss）
+}
+K_LIST = [1, 5, 10]
+
+
+# ── Dataset ───────────────────────────────────────────────────────────────
+
+class SASRecDataset(Dataset):
+    """
+    每条样本：用户历史前 n-1 个 item 作为输入，第 n 个 item 作为正样本，
+    随机采一个未交互 item 作为负样本（BPR 训练目标）。
+    """
+    def __init__(self, user_seqs, num_items, maxlen=50, num_neg=1):
+        self.samples  = []
+        self.num_items = num_items
+        self.num_neg   = num_neg
+
+        for user, seq in user_seqs.items():
+            if len(seq) < 2:
+                continue
+            interacted = set(seq)
+            input_seq  = seq[:-1][-maxlen:]  # 截断到 maxlen
+            pos_item   = seq[-1]
+            self.samples.append((input_seq, pos_item, interacted))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        input_seq, pos_item, interacted = self.samples[idx]
+        # 随机采负样本
+        neg_items = []
+        while len(neg_items) < self.num_neg:
+            neg = random.randint(1, self.num_items)
+            if neg not in interacted:
+                neg_items.append(neg)
+        return input_seq, pos_item, neg_items[0]
+
+
+def collate_sasrec(batch):
+    seqs     = [torch.tensor(s, dtype=torch.long) for s, _, _ in batch]
+    pos_items = torch.tensor([p for _, p, _ in batch], dtype=torch.long)
+    neg_items = torch.tensor([n for _, _, n in batch], dtype=torch.long)
+    input_ids = pad_sequence(seqs, batch_first=True, padding_value=0)
+    return input_ids, pos_items, neg_items
+
+
+# ── 评估 ──────────────────────────────────────────────────────────────────
+
+def evaluate_sasrec(model, test_seqs, num_items, device,
+                    maxlen=50, k_list=K_LIST, num_neg=99):
+    model.eval()
+    all_items = set(range(1, num_items + 1))
+    metrics   = {k: {'HR': [], 'NDCG': []} for k in k_list}
+
+    with torch.no_grad():
+        for user, full_seq in tqdm(test_seqs.items(), desc='Evaluating SASRec'):
+            target    = full_seq[-1]
+            history   = full_seq[:-1]
+            interacted = set(full_seq)
+
+            neg_pool = list(all_items - interacted)
+            if len(neg_pool) < num_neg:
+                continue
+            neg_samples  = random.sample(neg_pool, num_neg)
+            candidates   = [target] + neg_samples  # 100 个候选，target 在第 0 位
+
+            # 构造输入
+            input_seq = history[-maxlen:]
+            input_ids = torch.tensor(input_seq, dtype=torch.long).unsqueeze(0).to(device)
+            cand_ids  = torch.tensor(candidates, dtype=torch.long).unsqueeze(0).to(device)
+
+            scores = model.predict(input_ids, cand_ids).squeeze(0)  # (100,)
+            ranked = scores.argsort(descending=True).tolist()        # 按得分降序排列的索引
+            rank   = ranked.index(0) + 1                              # target 在第 0 位，找它的排名
+
+            for k in k_list:
+                metrics[k]['HR'].append(1 if rank <= k else 0)
+                metrics[k]['NDCG'].append(1 / math.log2(rank + 1) if rank <= k else 0)
+
+    model.train()
+    return {k: {m: np.mean(v) for m, v in mv.items()} for k, mv in metrics.items()}
+
+
+# ── 训练 ──────────────────────────────────────────────────────────────────
+
+def train():
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
+    print(f'使用设备: {device}')
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data     = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
+
+    num_items  = len(data['item2id'])
+    train_seqs = data['train']
+    test_seqs  = data['test']
+    print(f'item 数: {num_items}，训练用户数: {len(train_seqs)}')
+
+    train_dataset = SASRecDataset(train_seqs, num_items,
+                                  CONFIG['maxlen'], CONFIG['num_neg'])
+    train_loader  = DataLoader(train_dataset, batch_size=CONFIG['batch_size'],
+                               shuffle=True, collate_fn=collate_sasrec, num_workers=2)
+
+    model = SASRec(
+        num_items   = num_items,
+        hidden_size = CONFIG['hidden_size'],
+        num_layers  = CONFIG['num_layers'],
+        num_heads   = CONFIG['num_heads'],
+        dropout     = CONFIG['dropout'],
+        maxlen      = CONFIG['maxlen'],
+    ).to(device)
+
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f'SASRec 参数量: {total_params / 1e6:.2f}M')
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
+    bpr_loss  = lambda pos_scores, neg_scores: \
+        -torch.log(torch.sigmoid(pos_scores - neg_scores)).mean()
+
+    os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
+    best_hr10      = 0.0
+    patience_count = 0
+
+    print(f'\n开始训练，共 {CONFIG["num_epochs"]} epochs\n')
+    for epoch in range(1, CONFIG['num_epochs'] + 1):
+        total_loss = 0.0
+        for input_ids, pos_items, neg_items in train_loader:
+            input_ids = input_ids.to(device)
+            pos_items = pos_items.to(device)
+            neg_items = neg_items.to(device)
+
+            # 正负样本拼在一起打分
+            candidates = torch.stack([pos_items, neg_items], dim=1)  # (B, 2)
+            scores     = model.predict(input_ids, candidates)         # (B, 2)
+            pos_scores, neg_scores = scores[:, 0], scores[:, 1]
+
+            loss = bpr_loss(pos_scores, neg_scores)
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            total_loss += loss.item()
+
+        avg_loss = total_loss / len(train_loader)
+
+        if epoch % CONFIG['val_every'] == 0 or epoch == 1:
+            summary = evaluate_sasrec(model, test_seqs, num_items, device,
+                                      CONFIG['maxlen'])
+            hr10 = summary[10]['HR']
+            print(f'Epoch {epoch:3d}  loss={avg_loss:.4f}  '
+                  f'HR@1={summary[1]["HR"]:.4f}  '
+                  f'HR@5={summary[5]["HR"]:.4f}  '
+                  f'HR@10={hr10:.4f}  '
+                  f'NDCG@10={summary[10]["NDCG"]:.4f}')
+
+            if hr10 > best_hr10:
+                best_hr10 = hr10
+                patience_count = 0
+                torch.save(model.state_dict(),
+                           os.path.join(base_dir, 'checkpoints/sasrec_best.pt'))
+                print(f'  ✓ 保存最优模型 (HR@10={best_hr10:.4f})')
+            else:
+                patience_count += 1
+                if patience_count >= CONFIG['patience']:
+                    print(f'\nEarly stopping')
+                    break
+        else:
+            print(f'Epoch {epoch:3d}  loss={avg_loss:.4f}')
+
+    # 最终结果
+    print(f'\n{"="*50}')
+    print(f'  SASRec 最终结果  (best HR@10={best_hr10:.4f})')
+    print(f'{"="*50}')
+    model.load_state_dict(torch.load(
+        os.path.join(base_dir, 'checkpoints/sasrec_best.pt'),
+        map_location=device, weights_only=True))
+    final = evaluate_sasrec(model, test_seqs, num_items, device, CONFIG['maxlen'])
+    for k in K_LIST:
+        print(f'  HR@{k:<2} = {final[k]["HR"]:.4f}   NDCG@{k:<2} = {final[k]["NDCG"]:.4f}')
+
+
+if __name__ == '__main__':
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    train()
