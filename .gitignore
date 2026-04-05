@@ -5,8 +5,9 @@ PROJECT_PLAN.md
 data/reviews_Beauty_5.json.gz
 data/meta_Beauty.json.gz
 
-# Large embedding file
-embedding/item_llm_embeddings.npy
+# Large embedding files
+embedding/item_embeddings_raw.npy
+embedding/semantic_ids.npy
 
 # Python
 __pycache__/
