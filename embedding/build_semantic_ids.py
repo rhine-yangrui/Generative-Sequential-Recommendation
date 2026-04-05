@@ -17,7 +17,7 @@ from sklearn.cluster import MiniBatchKMeans
 from collections import Counter
 import os
 
-K_LEVELS = [4, 16, 256]   # 与 model/tokenizer.py 保持一致
+K_LEVELS = [4, 32, 256]   # 与 model/tokenizer.py 保持一致
 
 
 if __name__ == '__main__':
