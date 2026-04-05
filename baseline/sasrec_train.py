@@ -19,7 +19,10 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 
-from baseline.sasrec import SASRec
+try:
+    from baseline.sasrec import SASRec
+except ModuleNotFoundError:
+    from sasrec import SASRec
 
 CONFIG = {
     'maxlen':      50,
