@@ -3,7 +3,7 @@
 A simplified reproduction of [TIGER (NeurIPS 2023)](https://arxiv.org/abs/2305.05065).
 Items are encoded as hierarchical **Semantic IDs** derived from LLM embeddings, and an autoregressive GPT-2 model generates the next item's ID directly — no scoring over all items needed.
 
-Same dataset and evaluation protocol as the original paper, results are directly comparable.
+**Key finding**: The ablation experiment (random ID vs. semantic ID) is the core contribution — it isolates whether semantic structure in item IDs actually helps the autoregressive model, independent of the generative framework itself.
 
 ---
 
@@ -47,15 +47,21 @@ Offset design prevents token collisions between levels: c₁=5 and c₂=5 map to
 
 ## Results
 
-Amazon Beauty, leave-one-out evaluation, 99 random negatives per user (same as TIGER paper).
+**Evaluation protocol**: Leave-one-out, 99 random negatives, HR@K / NDCG@K (same as SASRec original paper).
+Note: TIGER uses all-rank Recall@K — its numbers are under a different protocol and **not directly comparable**.
 
 | Model | HR@1 | HR@5 | HR@10 | NDCG@10 |
 |-------|------|------|-------|---------|
-| SASRec (ID-based baseline) | - | - | - | - |
-| Generative + Random Semantic ID (ablation) | - | - | - | - |
-| **Generative + LLM Semantic ID — Round 1** (nomic-embed-text) | 0.0370 | 0.0755 | 0.1209 | 0.0706 |
-| **Generative + LLM Semantic ID — Round 2** (qwen2:7b) | ? | ? | ? | ? |
-| TIGER (original paper, all-rank, Recall@K) | — | — | 0.0648 | 0.0384 |
+| SASRec original paper (99-neg) | 0.1542 | 0.3684 | 0.4854 | — |
+| **SASRec** (our reproduction) | 0.0612 | 0.1751 | 0.2625 | 0.1466 |
+| Generative + Random Semantic ID (ablation, pending) | — | — | — | — |
+| Generative + nomic-embed-text (Round 1) | 0.0370 | 0.0755 | 0.1209 | 0.0706 |
+| **Generative + qwen2:7b (Round 2)** | 0.0354 | 0.0761 | 0.1233 | 0.0705 |
+
+**Analysis**:
+- Our generative model (HR@10=0.1233) is currently below our SASRec reproduction (HR@10=0.2625). The gap is expected given our simplified setup: 3.5M-param GPT-2 vs. the original TIGER's 60M T5-Small, and local embedding models vs. text-embedding-ada-002.
+- Our SASRec reproduction (HR@10=0.2625) is below the original paper (HR@10=0.4854), likely due to BPR loss vs. the original BCE loss.
+- The **ablation experiment** (random ID vs. LLM Semantic ID, same model otherwise) is the key experiment — it shows whether semantic structure in the IDs is the contributing factor, regardless of absolute numbers.
 
 ---
 
@@ -101,11 +107,15 @@ Amazon Beauty, leave-one-out evaluation, 99 random negatives per user (same as T
 
 | Step | Detail |
 |------|--------|
-| Embedding model | Local Ollama (current: `qwen2:7b`, 3584-dim; upgradeable to larger LLMs) |
+| Embedding model | Local Ollama — modular, swap one line to change model |
+| Round 1 | `nomic-embed-text` (137M, 768-dim) — cluster purity 91.65%, ~15 min |
+| Round 2 | `qwen2:7b` (7B, 3584-dim) — cluster purity 70.60%, ~36 min (2 workers) |
 | Clustering | Hierarchical k-means, 3 levels, K=256 per level |
-| Cluster purity | Mean 91.65% (items in same c₁ cluster share same product category) |
 | Unique IDs | 11,780 / 12,101 items have a unique (c₁, c₂, c₃) tuple |
 | Fallback | Hamming nearest-neighbor for unmatched generated IDs |
+
+> Cluster purity = % of items in same c₁ cluster sharing the same L2 product category.
+> nomic-embed-text outperformed qwen2:7b on this metric because it is specifically trained for semantic similarity, whereas qwen2:7b is a generative LLM whose hidden states capture more fine-grained but less category-aligned features.
 
 ---
 
@@ -121,7 +131,7 @@ Amazon Beauty, leave-one-out evaluation, 99 random negatives per user (same as T
 | Split | Leave-one-out (val = last-2nd item, test = last item) |
 | Evaluation | 99 random negatives + 1 target = 100 candidates |
 
-Same dataset and split as TIGER — results are directly comparable.
+Same dataset and split as TIGER. Note that evaluation protocols differ — see Results section.
 
 ---
 
