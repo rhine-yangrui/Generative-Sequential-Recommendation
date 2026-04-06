@@ -27,7 +27,7 @@ CONFIG = {
     'maxlen':      50,      # 用户历史最多保留多少个 item
     'batch_size':  128,     # 滑动窗口后样本量大幅增加，可用更大 batch
     'lr':          1e-3,
-    'num_epochs':  30,      # 样本多了不需要那么多 epoch
+    'num_epochs':  60,      # 30 epoch 时 val 还在涨，延长到 60
     'val_every':   5,       # beam search 验证更慢，降低验证频率
     'patience':    6,       # 连续 6 次 val Recall@10 不提升则停止
 }
