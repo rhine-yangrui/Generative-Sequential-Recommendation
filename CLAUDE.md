@@ -118,6 +118,6 @@ Save as `embedding/semantic_ids_random.npy`, retrain, evaluate. A significant Re
 |-------|----------|--------|-----------|---------|
 | SASRec (TIGER paper) | 0.0387 | 0.0249 | 0.0605 | 0.0318 |
 | TIGER | 0.0454 | 0.0321 | 0.0648 | 0.0384 |
-| Our SASRec (all-rank) | TBD | TBD | TBD | TBD |
+| Our SASRec (all-rank) | 0.0222 | 0.0114 | 0.0404 | 0.0172 |
 | Our Generative | TBD | TBD | TBD | TBD |
 | Generative + Random ID | TBD | TBD | TBD | TBD |

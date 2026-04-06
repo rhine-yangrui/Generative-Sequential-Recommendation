@@ -32,13 +32,14 @@ CONFIG = {
     'hidden_size': 64,
     'num_layers':  2,
     'num_heads':   1,
-    'dropout':     0.2,
-    'lr':          1e-3,
+    'dropout':     0.5,
+    'lr':          5e-4,
     'batch_size':  256,
     'num_epochs':  200,
     'patience':    20,
-    'val_every':   10,
+    'val_every':   5,
     'num_neg':     1,     # BPR loss 每个正样本对应的负样本数
+    'weight_decay': 0,  # L2 正则化权重衰减
 }
 K_LIST = [5, 10]
 
@@ -178,7 +179,7 @@ def train():
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'SASRec 参数量: {total_params / 1e6:.2f}M')
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'], weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'], weight_decay=CONFIG['weight_decay'])
     # 用 logsigmoid 而不是 log(sigmoid(...))，避免大数值时下溢导致 NaN
     bpr_loss  = lambda pos_s, neg_s: -F.logsigmoid(pos_s - neg_s).mean()
 
