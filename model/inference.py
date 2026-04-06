@@ -3,8 +3,8 @@ Beam Search 推理：给定用户历史，生成 top-k 推荐 item。
 
 流程：
   1. 历史序列 → token 序列
-  2. GPT-2 beam search 生成 3 个新 token
-  3. 还原成 (c1, c2, c3)，做范围合法性检查
+  2. GPT-2 beam search 生成完整 Semantic ID 的新 token
+  3. 还原成 semantic_id，做范围合法性检查
   4. 查反向索引找对应 item（精确匹配 or Hamming 距离最近邻）
 """
 
@@ -22,9 +22,7 @@ class LevelConstrainedLogitsProcessor(LogitsProcessor):
     在 beam search 每一步强制只生成当前层合法的 token。
 
     生成步骤：
-      step 0 -> c1
-      step 1 -> c2
-      step 2 -> c3
+      step d -> 只允许第 d 层对应范围内的 token
     """
     def __init__(self, input_len, k_levels, level_offsets):
         self.input_len = input_len
@@ -33,7 +31,7 @@ class LevelConstrainedLogitsProcessor(LogitsProcessor):
 
     def __call__(self, input_ids, scores):
         gen_step = input_ids.shape[1] - self.input_len
-        level = gen_step % 3
+        level = gen_step % len(self.k_levels)
 
         mask = torch.full_like(scores, float('-inf'))
         start = self.level_offsets[level]
@@ -44,11 +42,11 @@ class LevelConstrainedLogitsProcessor(LogitsProcessor):
 
 def build_reverse_index(semantic_ids):
     """
-    构建 (c1, c2, c3) → item_id 的反向索引，用于 beam search 后查找 item。
+    构建 semantic_id → item_id 的反向索引，用于 beam search 后查找 item。
 
     Returns:
-        sid_to_item:  dict，(c1, c2, c3) -> item_id
-        sid_array:    np.array，shape (N, 3)，所有 item 的 semantic_id 矩阵
+        sid_to_item:  dict，semantic_id -> item_id
+        sid_array:    np.array，shape (N, D)，所有 item 的 semantic_id 矩阵
         item_id_list: list，和 sid_array 行对齐的 item_id
     """
     sid_to_item  = {tuple(int(x) for x in sid): iid for iid, sid in semantic_ids.items()}
@@ -59,7 +57,7 @@ def build_reverse_index(semantic_ids):
 
 def hamming_nearest(candidate_sid, sid_array, item_id_list, exclude_ids=None):
     """
-    当 beam search 生成的 (c1,c2,c3) 没有精确匹配时，
+    当 beam search 生成的 semantic_id 没有精确匹配时，
     用 Hamming 距离找最近邻 item。
     """
     cand      = np.array(candidate_sid, dtype=np.int32)
@@ -81,9 +79,9 @@ def predict_topk(model, history_seq, semantic_ids, sid_to_item,
     Args:
         model:        训练好的 GPT-2 模型
         history_seq:  用户历史 item_id 列表（不含 target）
-        semantic_ids: item_id -> (c1, c2, c3)
-        sid_to_item:  (c1, c2, c3) -> item_id 反向索引
-        sid_array:    (N, 3) 所有 item 的 semantic_id 矩阵
+        semantic_ids: item_id -> semantic_id
+        sid_to_item:  semantic_id -> item_id 反向索引
+        sid_array:    (N, D) 所有 item 的 semantic_id 矩阵
         item_id_list: 和 sid_array 对齐的 item_id 列表
         k:            返回 top-k 个推荐
         beam_width:   beam search 宽度（建议 ≥ k*3）
@@ -105,7 +103,7 @@ def predict_topk(model, history_seq, semantic_ids, sid_to_item,
     with torch.no_grad():
         outputs = model.generate(
             input_ids,
-            max_new_tokens=3,
+            max_new_tokens=len(K_LEVELS),
             num_beams=beam_width,
             num_return_sequences=min(beam_width, k * 5),
             early_stopping=False,
@@ -118,16 +116,13 @@ def predict_topk(model, history_seq, semantic_ids, sid_to_item,
 
     for output in outputs:
         new_tokens = output[len(input_tokens):].tolist()
-        if len(new_tokens) < 3:
+        if len(new_tokens) < len(K_LEVELS):
             continue
 
         try:
-            candidate_sid = tokens_to_semantic_id(new_tokens[:3])
-            c1, c2, c3   = candidate_sid
+            candidate_sid = tokens_to_semantic_id(new_tokens[:len(K_LEVELS)])
             # 合法性检查：每层的值必须在对应码本范围内
-            if not (0 <= c1 < K_LEVELS[0] and
-                    0 <= c2 < K_LEVELS[1] and
-                    0 <= c3 < K_LEVELS[2]):
+            if any(not (0 <= code < k) for code, k in zip(candidate_sid, K_LEVELS)):
                 continue
         except Exception:
             continue

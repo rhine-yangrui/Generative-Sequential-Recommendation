@@ -17,7 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
 from model.tokenizer import (
-    seq_to_tokens, item_to_tokens, VOCAB_SIZE, PAD_TOKEN
+    seq_to_tokens, item_to_tokens, VOCAB_SIZE, PAD_TOKEN, K_LEVELS
 )
 from model.generative_rec import build_model, count_parameters
 from model.inference import build_reverse_index, predict_topk
@@ -34,6 +34,7 @@ CONFIG = {
 # ─────────────────────────────────────────────────────────────────────────
 
 ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae.npy'
+TARGET_LEN = len(K_LEVELS)
 
 
 class RecDataset(Dataset):
@@ -48,7 +49,7 @@ class RecDataset(Dataset):
     augment=False（验证集）：
       每个用户只预测最后一个 item（与测试集评估方式一致）。
 
-    训练只对最后 3 个 token（目标 item 的 c1/c2/c3，不含 EOS）计算 loss，
+    训练只对最后 TARGET_LEN 个 token（目标 item 的 Semantic ID，不含 EOS）计算 loss，
     历史部分的 loss 用 -100 mask 掉。
     """
     def __init__(self, user_seqs, semantic_ids, maxlen=50, augment=True):
@@ -69,8 +70,8 @@ class RecDataset(Dataset):
                     history      = seq[:t]
                     input_tokens = seq_to_tokens(history, semantic_ids, maxlen)
                     target_tokens = item_to_tokens(semantic_ids[target_item])
-                    # full_tokens = [BOS, ..., c1^T, c2^T, c3^T]
-                    # target 不追加 EOS，只监督 3 个 code token。
+                    # full_tokens = [BOS, ..., semantic_id^T]
+                    # target 不追加 EOS，只监督 Semantic ID token。
                     full_tokens  = input_tokens + target_tokens
                     self.samples.append((full_tokens, len(input_tokens)))
             else:
@@ -81,8 +82,8 @@ class RecDataset(Dataset):
                     continue
                 input_tokens  = seq_to_tokens(seq[:-1], semantic_ids, maxlen)
                 target_tokens = item_to_tokens(semantic_ids[target_item])
-                # full_tokens = [BOS, ..., c1^T, c2^T, c3^T]
-                # target 不追加 EOS，只监督 3 个 code token。
+                # full_tokens = [BOS, ..., semantic_id^T]
+                # target 不追加 EOS，只监督 Semantic ID token。
                 full_tokens   = input_tokens + target_tokens
                 self.samples.append((full_tokens, len(input_tokens)))
 
@@ -101,7 +102,7 @@ def collate_fn(batch):
     将一个 batch 的样本 padding 到相同长度。
 
     input_ids:  (B, max_len)，PAD_TOKEN 填充
-    labels:     (B, max_len)，历史部分 mask 为 -100，只有目标 3 个 token 计算 loss
+    labels:     (B, max_len)，历史部分 mask 为 -100，只有目标 Semantic ID token 计算 loss
     """
     token_seqs   = [torch.tensor(tokens, dtype=torch.long) for tokens, _ in batch]
     history_lens = [hist_len for _, hist_len in batch]
@@ -111,7 +112,7 @@ def collate_fn(batch):
     labels = torch.full_like(input_ids, -100)
     for i, (tokens, hist_len) in enumerate(zip(token_seqs, history_lens)):
         target_start = hist_len
-        target_end   = hist_len + 3
+        target_end   = hist_len + TARGET_LEN
         labels[i, target_start:target_end] = tokens[target_start:target_end]
 
     return input_ids, labels

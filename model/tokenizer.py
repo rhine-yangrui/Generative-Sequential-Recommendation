@@ -1,46 +1,41 @@
 """
-Token 词表设计（分层码本 4/16/256，粗到细）：
-- Level 1 codes: token   0 ~   3  (4 个，直接用 c1)
-- Level 2 codes: token   4 ~  19  (16 个，c2 + 4)
-- Level 3 codes: token  20 ~ 275  (256 个，c3 + 20)
-- [BOS]: token 276
-- [EOS]: token 277
-- [PAD]: token 278
+Token 词表设计：
+- RQ-VAE 学到的三级 Semantic ID: 4 / 16 / 256
+- 若前三码发生 collision，则追加第 4 个去冲突 token（0~255）
 
-码本结构：c1 ∈ {0..3}（4 大类），c2 ∈ {0..15}（子类），c3 ∈ {0..255}（细分）。
-总容量 4×16×256 = 16,384 > 12,101 items。
+最终用于生成式模型的 Semantic ID 长度为 4：
+  (c1, c2, c3, c4)
 
-偏移设计避免层间 token 冲突：
-  c1=2  → token 2
-  c2=2  → token 6   (2 + 4)
-  c3=2  → token 22  (2 + 20)
+其中：
+- c1, c2, c3 由 RQ-VAE 学习得到
+- c4 仅用于 collision resolution；无冲突时统一为 0
+- c4 容量设为 512，以覆盖当前数据上的最大 collision group
 """
 
-K_LEVELS = [4, 16, 256]                          # 每层码本大小
-LEVEL_OFFSETS = [0, K_LEVELS[0],                 # [0, 4, 20]
-                 K_LEVELS[0] + K_LEVELS[1]]
+K_LEVELS = [4, 16, 256, 512]
 
-VOCAB_SIZE = sum(K_LEVELS) + 3                    # = 279
-BOS_TOKEN  = sum(K_LEVELS)                        # = 276
-EOS_TOKEN  = sum(K_LEVELS) + 1                    # = 277
-PAD_TOKEN  = sum(K_LEVELS) + 2                    # = 278
+LEVEL_OFFSETS = []
+_offset = 0
+for _k in K_LEVELS:
+    LEVEL_OFFSETS.append(_offset)
+    _offset += _k
+
+VOCAB_SIZE = sum(K_LEVELS) + 3
+BOS_TOKEN  = sum(K_LEVELS)
+EOS_TOKEN  = sum(K_LEVELS) + 1
+PAD_TOKEN  = sum(K_LEVELS) + 2
 
 
 def item_to_tokens(semantic_id):
-    """把一个 item 的 (c1, c2, c3) 转成 3 个 token 编号。"""
-    c1, c2, c3 = semantic_id
-    return [int(c1) + LEVEL_OFFSETS[0],
-            int(c2) + LEVEL_OFFSETS[1],
-            int(c3) + LEVEL_OFFSETS[2]]
+    """把一个 item 的 semantic_id 转成对应 token 编号。"""
+    return [int(code) + LEVEL_OFFSETS[level]
+            for level, code in enumerate(semantic_id)]
 
 
 def tokens_to_semantic_id(tokens):
-    """把 3 个 token 编号还原成 (c1, c2, c3)，用于推理阶段解码。"""
-    assert len(tokens) == 3
-    c1 = tokens[0] - LEVEL_OFFSETS[0]
-    c2 = tokens[1] - LEVEL_OFFSETS[1]
-    c3 = tokens[2] - LEVEL_OFFSETS[2]
-    return (c1, c2, c3)
+    """把 token 编号还原成 semantic_id，用于推理阶段解码。"""
+    assert len(tokens) == len(K_LEVELS)
+    return tuple(token - LEVEL_OFFSETS[level] for level, token in enumerate(tokens))
 
 
 def seq_to_tokens(item_seq, semantic_ids, maxlen=50):
@@ -53,7 +48,7 @@ def seq_to_tokens(item_seq, semantic_ids, maxlen=50):
         maxlen:       最多保留最近多少个 item
 
     Returns:
-        token 列表，如 [276, 2, 5, 22, 277, 0, 4, 20, 277, ...]
+        token 列表，如 [BOS, c1, c2, c3, c4, EOS, ...]
     """
     tokens = [BOS_TOKEN]
     for item_id in item_seq[-maxlen:]:

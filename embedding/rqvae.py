@@ -24,11 +24,14 @@ INPUT_DIM = 768
 HIDDEN_DIMS = [512, 256, 128]
 LATENT_DIM = 32
 K_LEVELS = [4, 16, 256]
+COLLISION_K = 512
 BETA = 0.25
 LR = 0.4
 BATCH_SIZE = 1024
 NUM_EPOCHS = 500
 MIN_USAGE = 0.80
+WARMUP_EPOCHS = 20
+SEED_CANDIDATES = [40, 41, 42, 43, 44]
 
 
 class Encoder(nn.Module):
@@ -156,70 +159,16 @@ def compute_codebook_usage(model, data_tensor, batch_size=BATCH_SIZE):
     return usages
 
 
-def resolve_collisions(semantic_ids):
-    sid_to_items = defaultdict(list)
-    for item_id, sid in semantic_ids.items():
-        sid_to_items[sid].append(item_id)
-
-    collisions = {sid: items for sid, items in sid_to_items.items() if len(items) > 1}
-    print(
-        f'冲突 Semantic ID 数: {len(collisions)}（共涉及 '
-        f'{sum(len(v) for v in collisions.values())} items）'
-    )
-
-    if not collisions:
-        return semantic_ids
-
-    group_counts = Counter((sid[0], sid[1]) for sid in semantic_ids.values())
-    overflow_groups = {group: count for group, count in group_counts.items() if count > K_LEVELS[2]}
-    if overflow_groups:
-        raise RuntimeError(
-            f'存在 {len(overflow_groups)} 个 (c0, c1) 分组超过 K3={K_LEVELS[2]}，'
-            '无法仅通过重排 c2 解决冲突。'
-        )
-
-    used_sids = set(semantic_ids.values())
-    for sid, items in collisions.items():
-        c0, c1, c2_base = sid
-        for item_id in items[1:]:
-            new_c2 = (c2_base + 1) % K_LEVELS[2]
-            while (c0, c1, new_c2) in used_sids:
-                new_c2 = (new_c2 + 1) % K_LEVELS[2]
-            semantic_ids[item_id] = (c0, c1, new_c2)
-            used_sids.add((c0, c1, new_c2))
-
-    return semantic_ids
+def usage_score(usages):
+    score = 0.0
+    for level, usage in enumerate(usages):
+        score += usage * (10 ** level)
+    return float(score)
 
 
-def train_rqvae():
-    device = select_device()
-    print(f'使用设备: {device}')
-
-    emb_dir = os.path.dirname(os.path.abspath(__file__))
-    raw = np.load(
-        os.path.join(emb_dir, 'item_embeddings_raw_nomic.npy'),
-        allow_pickle=True,
-    ).item()
-
-    item_ids = sorted(raw.keys())
-    emb_matrix = np.stack([raw[i] for i in item_ids]).astype(np.float32)
-    print(f"加载 embedding: {emb_matrix.shape}")
-
-    data_tensor = torch.tensor(emb_matrix, dtype=torch.float32, device=device)
-    n_items = len(data_tensor)
-
-    model = RQVAE().to(device)
-    optimizer = torch.optim.Adagrad(model.parameters(), lr=LR)
-
-    print("初始化码本（k-means）...")
-    model.encoder.eval()
-    with torch.no_grad():
-        z_all = model.encoder(data_tensor)
-    model.quantizer.kmeans_init(z_all)
-    model.train()
-
-    print(f'\n开始训练 RQ-VAE，最多 {NUM_EPOCHS} epochs\n')
-    for epoch in range(1, NUM_EPOCHS + 1):
+def train_epochs(model, optimizer, data_tensor, n_items, device, start_epoch, end_epoch):
+    last_avg_loss = None
+    for epoch in range(start_epoch, end_epoch + 1):
         perm = torch.randperm(n_items, device=device)
         total_loss = 0.0
         n_batches = 0
@@ -236,8 +185,113 @@ def train_rqvae():
             total_loss += loss.item()
             n_batches += 1
 
-        avg_loss = total_loss / n_batches
-        if epoch % 20 == 0 or epoch == 1:
+        last_avg_loss = total_loss / n_batches
+
+    return last_avg_loss
+
+
+def warmup_seed_search(data_tensor, n_items, device):
+    best = None
+
+    print('开始 warmup seed search...')
+    for seed in SEED_CANDIDATES:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+        model = RQVAE().to(device)
+        optimizer = torch.optim.Adagrad(model.parameters(), lr=LR)
+
+        with torch.no_grad():
+            z_all = model.encoder(data_tensor)
+        model.quantizer.kmeans_init(z_all)
+        model.train()
+
+        avg_loss = train_epochs(
+            model, optimizer, data_tensor, n_items, device, start_epoch=1, end_epoch=WARMUP_EPOCHS
+        )
+        usages = compute_codebook_usage(model, data_tensor)
+        score = usage_score(usages)
+
+        print(
+            f'  seed={seed}  warmup_loss={avg_loss:.4f}  '
+            f'usage=' + '  '.join([f'L{i}={u:.1%}' for i, u in enumerate(usages)])
+        )
+
+        candidate = {
+            'seed': seed,
+            'model': model,
+            'optimizer': optimizer,
+            'usages': usages,
+            'score': score,
+            'avg_loss': avg_loss,
+        }
+        if best is None or candidate['score'] > best['score']:
+            best = candidate
+
+    print(
+        f'选择 seed={best["seed"]} 作为正式训练起点，'
+        f'usage=' + '  '.join([f'L{i}={u:.1%}' for i, u in enumerate(best['usages'])])
+    )
+    return best
+
+
+def resolve_collisions(semantic_ids):
+    sid_to_items = defaultdict(list)
+    for item_id, sid in semantic_ids.items():
+        sid_to_items[sid].append(item_id)
+
+    collisions = {sid: items for sid, items in sid_to_items.items() if len(items) > 1}
+    print(
+        f'冲突 Semantic ID 数: {len(collisions)}（共涉及 '
+        f'{sum(len(v) for v in collisions.values())} items）'
+    )
+
+    if not collisions:
+        return {item_id: (*sid, 0) for item_id, sid in semantic_ids.items()}
+
+    max_group_size = max(len(items) for items in sid_to_items.values())
+    if max_group_size > COLLISION_K:
+        raise RuntimeError(
+            f'最大 collision group 大小为 {max_group_size}，超过 c4 容量 {COLLISION_K}。'
+        )
+
+    resolved = {}
+    for sid, items in sid_to_items.items():
+        for collision_idx, item_id in enumerate(items):
+            resolved[item_id] = (*sid, collision_idx)
+
+    return resolved
+
+
+def train_rqvae():
+    device = select_device()
+    print(f'使用设备: {device}')
+
+    emb_dir = os.path.dirname(os.path.abspath(__file__))
+    raw = np.load(
+        os.path.join(emb_dir, 'item_embeddings_raw_nomic.npy'),
+        allow_pickle=True,
+    ).item()
+
+    item_ids = sorted(raw.keys())
+    emb_matrix = np.stack([raw[i] for i in item_ids]).astype(np.float32)
+    # nomic embeddings 先做 L2 normalize，能显著降低 RQ-VAE collapse 的概率。
+    emb_matrix /= np.clip(np.linalg.norm(emb_matrix, axis=1, keepdims=True), 1e-12, None)
+    print(f"加载 embedding: {emb_matrix.shape}")
+
+    data_tensor = torch.tensor(emb_matrix, dtype=torch.float32, device=device)
+    n_items = len(data_tensor)
+
+    best = warmup_seed_search(data_tensor, n_items, device)
+    model = best['model']
+    optimizer = best['optimizer']
+
+    print(f'\n开始训练 RQ-VAE，最多 {NUM_EPOCHS} epochs\n')
+    for epoch in range(WARMUP_EPOCHS + 1, NUM_EPOCHS + 1):
+        avg_loss = train_epochs(
+            model, optimizer, data_tensor, n_items, device, start_epoch=epoch, end_epoch=epoch
+        )
+        if epoch % 20 == 0:
             usages = compute_codebook_usage(model, data_tensor)
             usage_str = '  '.join([f'L{i}={u:.1%}' for i, u in enumerate(usages)])
             print(f'Epoch {epoch:4d}  loss={avg_loss:.4f}  codebook usage: {usage_str}')
