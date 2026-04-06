@@ -19,7 +19,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 
 try:
@@ -56,12 +55,16 @@ class SASRecDataset(Dataset):
         self.num_neg   = num_neg
 
         for user, seq in user_seqs.items():
-            if len(seq) < 2:
+            if len(seq) < 1:
                 continue
             interacted = set(seq)
-            input_seq  = seq[:-1][-maxlen:]
-            pos_item   = seq[-1]
-            self.samples.append((input_seq, pos_item, interacted))
+            # First item: empty history
+            self.samples.append(([], seq[0], interacted))
+            # All subsequent positions (sliding window)
+            for i in range(1, len(seq)):
+                input_seq = seq[:i][-maxlen:]
+                pos_item  = seq[i]
+                self.samples.append((input_seq, pos_item, interacted))
 
     def __len__(self):
         return len(self.samples)
@@ -77,10 +80,16 @@ class SASRecDataset(Dataset):
 
 
 def collate_sasrec(batch):
-    seqs      = [torch.tensor(s, dtype=torch.long) for s, _, _ in batch]
+    maxlen    = max(len(s) for s, _, _ in batch)
+    maxlen    = max(maxlen, 1)
+    # Left-pad sequences with 0 (padding_idx)
+    padded    = []
+    for s, _, _ in batch:
+        pad_len = maxlen - len(s)
+        padded.append([0] * pad_len + list(s))
+    input_ids = torch.tensor(padded, dtype=torch.long)
     pos_items = torch.tensor([p for _, p, _ in batch], dtype=torch.long)
     neg_items = torch.tensor([n for _, _, n in batch], dtype=torch.long)
-    input_ids = pad_sequence(seqs, batch_first=True, padding_value=0)
     return input_ids, pos_items, neg_items
 
 
@@ -106,7 +115,9 @@ def evaluate_sasrec_allrank(model, test_seqs, num_items, device,
             history = full_seq[:-1]
 
             input_seq = history[-maxlen:]
-            input_ids = torch.tensor(input_seq, dtype=torch.long).unsqueeze(0).to(device)
+            pad_len   = maxlen - len(input_seq)
+            input_seq_padded = [0] * pad_len + list(input_seq)
+            input_ids = torch.tensor([input_seq_padded], dtype=torch.long).to(device)
 
             # 对全量 item 打分 → (num_items,)
             scores = model.predict(input_ids, all_item_ids).squeeze(0)
@@ -145,6 +156,7 @@ def train():
 
     num_items  = len(data['item2id'])
     train_seqs = data['train']
+    val_seqs   = data['val']
     test_seqs  = data['test']
     print(f'item 数: {num_items}，训练用户数: {len(train_seqs)}')
 
@@ -165,7 +177,7 @@ def train():
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'SASRec 参数量: {total_params / 1e6:.2f}M')
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
+    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'], weight_decay=1e-4)
     bpr_loss  = lambda pos_s, neg_s: \
         -torch.log(torch.sigmoid(pos_s - neg_s)).mean()
 
@@ -195,7 +207,7 @@ def train():
         avg_loss = total_loss / len(train_loader)
 
         if epoch % CONFIG['val_every'] == 0 or epoch == 1:
-            summary   = evaluate_sasrec_allrank(model, test_seqs, num_items, device,
+            summary   = evaluate_sasrec_allrank(model, val_seqs, num_items, device,
                                                 CONFIG['maxlen'])
             recall10  = summary[10]['Recall']
             print(f'Epoch {epoch:3d}  loss={avg_loss:.4f}  '

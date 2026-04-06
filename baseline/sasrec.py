@@ -76,10 +76,8 @@ class SASRec(nn.Module):
         x = self.transformer(x, mask=causal_mask, src_key_padding_mask=pad_mask,
                              is_causal=True)
 
-        # 取每个序列最后一个非 padding 位置的表示
-        lengths    = (item_seq != 0).sum(dim=1) - 1          # (B,) 最后有效位置的索引
-        lengths    = lengths.clamp(min=0)
-        seq_emb    = x[torch.arange(B, device=x.device), lengths]  # (B, hidden_size)
+        # 左对齐后，最后一个位置始终是最近的有效 item
+        seq_emb = x[:, -1, :]  # (B, hidden_size)
         return seq_emb
 
     def predict(self, item_seq, candidate_ids):
