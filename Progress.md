@@ -33,7 +33,7 @@
 | E2 | K-means + 随机 ID（消融） | — | 4/64/256 | 30 | 0.0025 | 0.0016 | 0.0042 | 0.0021 | 对照组；LLM vs Random +0.0280 |
 | E3 | SASRec baseline（修复后） | — | — | 200 epochs | 0.0222 | 0.0114 | 0.0404 | 0.0172 | val best=0.0543；hidden=128，dropout=0.5，wd=1e-4 |
 | E3b | SASRec baseline（调参） | — | — | 400 epochs | 0.0358 | 0.0180 | 0.0573 | 0.0250 | val best Recall@10=0.0730；hidden=128，dropout=0.5，wd=0，val_every=5 |
-| E4 | RQ-VAE | nomic-embed-text (768d) | 4/16/256 | TBD | — | — | — | — | 计划中 |
+| E4 | RQ-VAE (+c4 collision) | nomic-embed-text (768d) | 4/16/256(+512) | 50+300 | TBD | TBD | TBD | TBD | unique_rate=41.2%（容量瓶颈，详见下文与 RQVAE_Analysis.md） |
 
 ---
 
@@ -134,14 +134,29 @@
 
 ---
 
-### E4：RQ-VAE（计划中）
+### E4：RQ-VAE（实现中）
 
-**动机**：k-means 是 post-hoc 聚类，无法端到端优化码本。RQ-VAE 通过重建 loss + commitment loss 联合训练 encoder/codebook/decoder，码本主动学到对语义分组有用的结构，cluster purity 更高，冲突率更低。这是 TIGER 原文的核心贡献。
+**动机**：k-means 是 post-hoc 聚类，无法端到端优化码本。RQ-VAE 通过重建 loss + commitment loss 联合训练 encoder/codebook/decoder。
 
-**计划配置**
-- Embedding 输入：nomic-embed-text（768 维，cluster purity 91.65%）
-- 码本结构：4/16/256（RQ-VAE 无子簇溢出问题，可回到原文结构）
-- 架构：Encoder MLP → 3 层残差量化 → Decoder MLP
-- 训练：standalone，先训 RQ-VAE 得到 semantic_ids.npy，再训推荐模型
+**实现配置**
+- Embedding 输入：nomic-embed-text（768 维，L2 normalized）
+- 码本结构：3 层 RQ-VAE `[4, 16, 256]`，下游再追加 `c4=512` 做碰撞解决（4-token ID）
+- 架构：Encoder MLP `[768→512→256→128→32]` → 3 层残差量化 → 对称 Decoder
+- 训练：50 epoch encoder warmup → k-means init → 300 epoch joint training；
+  Sinkhorn 平衡分配 (`sk_epsilons=[0.0, 0.003, 0.003]`，log-domain)；
+  AdamW + Cosine LR + grad clip；定期 dead-code reset
 
-> 结果待填写
+**RQ-VAE 训练结果**
+- 最优 `unique_rate = 41.2%`（before c4 collision resolution）
+- 码本使用率：L0 / L1 / L2 全部 100%
+- 冲突组数 = 2568，最大冲突组 = 24（c4 容量 512，安全）
+- recon ≈ 2e-4，rq ≈ 1e-4
+
+**分析（详见 RQVAE_Analysis.md）**
+- 41% unique 不是 codebook collapse，而是 **容量瓶颈**：
+  `4 × 16 × 256 = 16384` 个联合槽位，对 12,101 个 item 来说残差量化稍微非均匀就会大量碰撞。
+- 加 c4 后所有 12,101 个 item 都能拿到唯一 4-tuple，下游训练可以照常进行。
+- 如果下游 Recall@10 不达标，下一步应改 `K_LEVELS = [256, 256, 256]` 对齐 TIGER 原文。
+
+**下游训练（generative + RQ-VAE）**
+- 结果待填写
