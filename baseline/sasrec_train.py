@@ -18,6 +18,7 @@ import pickle
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
@@ -178,8 +179,8 @@ def train():
     print(f'SASRec 参数量: {total_params / 1e6:.2f}M')
 
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'], weight_decay=1e-4)
-    bpr_loss  = lambda pos_s, neg_s: \
-        -torch.log(torch.sigmoid(pos_s - neg_s)).mean()
+    # 用 logsigmoid 而不是 log(sigmoid(...))，避免大数值时下溢导致 NaN
+    bpr_loss  = lambda pos_s, neg_s: -F.logsigmoid(pos_s - neg_s).mean()
 
     os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
     best_recall10  = 0.0
