@@ -10,7 +10,36 @@ Beam Search 推理：给定用户历史，生成 top-k 推荐 item。
 
 import torch
 import numpy as np
-from model.tokenizer import seq_to_tokens, tokens_to_semantic_id, PAD_TOKEN, K_LEVELS
+from transformers import LogitsProcessor, LogitsProcessorList
+
+from model.tokenizer import (
+    seq_to_tokens, tokens_to_semantic_id, PAD_TOKEN, K_LEVELS, LEVEL_OFFSETS
+)
+
+
+class LevelConstrainedLogitsProcessor(LogitsProcessor):
+    """
+    在 beam search 每一步强制只生成当前层合法的 token。
+
+    生成步骤：
+      step 0 -> c1
+      step 1 -> c2
+      step 2 -> c3
+    """
+    def __init__(self, input_len, k_levels, level_offsets):
+        self.input_len = input_len
+        self.k_levels = k_levels
+        self.level_offsets = level_offsets
+
+    def __call__(self, input_ids, scores):
+        gen_step = input_ids.shape[1] - self.input_len
+        level = gen_step % 3
+
+        mask = torch.full_like(scores, float('-inf'))
+        start = self.level_offsets[level]
+        end = start + self.k_levels[level]
+        mask[:, start:end] = 0.0
+        return scores + mask
 
 
 def build_reverse_index(semantic_ids):
@@ -65,6 +94,13 @@ def predict_topk(model, history_seq, semantic_ids, sid_to_item,
     model.eval()
     input_tokens = seq_to_tokens(history_seq, semantic_ids, maxlen=50)
     input_ids    = torch.tensor(input_tokens, dtype=torch.long).unsqueeze(0).to(device)
+    input_len    = len(input_tokens)
+
+    constrained_processor = LevelConstrainedLogitsProcessor(
+        input_len=input_len,
+        k_levels=K_LEVELS,
+        level_offsets=LEVEL_OFFSETS,
+    )
 
     with torch.no_grad():
         outputs = model.generate(
@@ -72,8 +108,9 @@ def predict_topk(model, history_seq, semantic_ids, sid_to_item,
             max_new_tokens=3,
             num_beams=beam_width,
             num_return_sequences=min(beam_width, k * 5),
-            early_stopping=True,
+            early_stopping=False,
             pad_token_id=PAD_TOKEN,
+            logits_processor=LogitsProcessorList([constrained_processor]),
         )
 
     recommended = []

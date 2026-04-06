@@ -2,8 +2,8 @@
 生成式推荐模型：基于 GPT-2 架构，从头训练（不加载预训练权重）。
 
 输入：用户历史行为的 Semantic ID token 序列
-      [BOS, c1¹, c2¹+4, c3¹+68,  c1², c2²+4, c3²+68,  ...]
-输出：下一个 item 的 Semantic ID token (c1, c2+256, c3+512)
+      [BOS, c1¹, c2¹+4, c3¹+20, EOS, c1², c2²+4, c3²+20, EOS, ...]
+输出：下一个 item 的 Semantic ID token (c1, c2+4, c3+20)
 """
 
 from transformers import GPT2Config, GPT2LMHeadModel
@@ -26,11 +26,11 @@ def build_model(n_embd=256, n_layer=4, n_head=4):
         GPT2LMHeadModel，未初始化权重（随机）
     """
     config = GPT2Config(
-        vocab_size=VOCAB_SIZE,   # 327 (4+64+256+3)
+        vocab_size=VOCAB_SIZE,   # 279 (4+16+256+3)
         n_embd=n_embd,
         n_layer=n_layer,
         n_head=n_head,
-        n_positions=512,         # 最大序列长度：50 items × 3 tokens + 1 BOS = 151，512 足够
+        n_positions=512,         # 1 BOS + 4*maxlen items (c1/c2/c3/EOS each) = 201 max
         bos_token_id=BOS_TOKEN,
         eos_token_id=EOS_TOKEN,
         pad_token_id=PAD_TOKEN,
@@ -57,7 +57,7 @@ if __name__ == '__main__':
 
     # 构造一个假的 batch 验证 forward pass
     batch_size = 4
-    seq_len = 16   # BOS + 5 items × 3 tokens = 16
+    seq_len = 21   # BOS + 5 items × 4 tokens(c1/c2/c3/EOS) = 21
     input_ids = torch.randint(0, VOCAB_SIZE, (batch_size, seq_len))
     input_ids[:, 0] = BOS_TOKEN  # 第一个 token 是 BOS
 
@@ -65,5 +65,5 @@ if __name__ == '__main__':
     outputs = model(input_ids=input_ids, labels=input_ids)
     print(f'Forward pass 成功')
     print(f'  输入 shape: {input_ids.shape}')
-    print(f'  Loss: {outputs.loss.item():.4f}  (随机初始化，期望 ≈ ln(771) = {__import__("math").log(VOCAB_SIZE):.2f})')
+    print(f'  Loss: {outputs.loss.item():.4f}  (随机初始化，期望 ≈ ln({VOCAB_SIZE}) = {__import__("math").log(VOCAB_SIZE):.2f})')
     print(f'  Logits shape: {outputs.logits.shape}  (batch, seq_len, vocab_size)')

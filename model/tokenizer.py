@@ -1,34 +1,29 @@
 """
-Token 词表设计（分层码本 4/64/256，粗到细）：
+Token 词表设计（分层码本 4/16/256，粗到细）：
 - Level 1 codes: token   0 ~   3  (4 个，直接用 c1)
-- Level 2 codes: token   4 ~  67  (64 个，c2 + 4)
-- Level 3 codes: token  68 ~ 323  (256 个，c3 + 68)
-- [BOS]: token 324
-- [EOS]: token 325
-- [PAD]: token 326
+- Level 2 codes: token   4 ~  19  (16 个，c2 + 4)
+- Level 3 codes: token  20 ~ 275  (256 个，c3 + 20)
+- [BOS]: token 276
+- [EOS]: token 277
+- [PAD]: token 278
 
-码本结构：c1 ∈ {0..3}（4 大类），c2 ∈ {0..63}（子类），c3 ∈ {0..255}（细分）。
-总容量 4×64×256 = 65,536 >> 12,101 items。
-
-L2 使用 64：k-means 不同于 RQ-VAE，无法端到端最小化冲突，需要足够大的
-L2 容量保证每个 (c1,c2) 子簇 ≤ 256 items。实测 Beauty 数据集 L1 最大簇
-3656 items，K2=32 时出现 281 items 的子簇（> K3=256），K2=64 时平均
-~57 items/子簇，安全。
+码本结构：c1 ∈ {0..3}（4 大类），c2 ∈ {0..15}（子类），c3 ∈ {0..255}（细分）。
+总容量 4×16×256 = 16,384 > 12,101 items。
 
 偏移设计避免层间 token 冲突：
   c1=2  → token 2
   c2=2  → token 6   (2 + 4)
-  c3=2  → token 70  (2 + 68)
+  c3=2  → token 22  (2 + 20)
 """
 
-K_LEVELS = [4, 64, 256]                          # 每层码本大小
-LEVEL_OFFSETS = [0, K_LEVELS[0],                 # [0, 4, 68]
+K_LEVELS = [4, 16, 256]                          # 每层码本大小
+LEVEL_OFFSETS = [0, K_LEVELS[0],                 # [0, 4, 20]
                  K_LEVELS[0] + K_LEVELS[1]]
 
-VOCAB_SIZE = sum(K_LEVELS) + 3                    # = 327
-BOS_TOKEN  = sum(K_LEVELS)                        # = 324
-EOS_TOKEN  = sum(K_LEVELS) + 1                    # = 325
-PAD_TOKEN  = sum(K_LEVELS) + 2                    # = 326
+VOCAB_SIZE = sum(K_LEVELS) + 3                    # = 279
+BOS_TOKEN  = sum(K_LEVELS)                        # = 276
+EOS_TOKEN  = sum(K_LEVELS) + 1                    # = 277
+PAD_TOKEN  = sum(K_LEVELS) + 2                    # = 278
 
 
 def item_to_tokens(semantic_id):
@@ -50,7 +45,7 @@ def tokens_to_semantic_id(tokens):
 
 def seq_to_tokens(item_seq, semantic_ids, maxlen=50):
     """
-    把用户的 item ID 序列转成 token 序列（含 BOS）。
+    把用户的 item ID 序列转成 token 序列（含 BOS，每个 item 后加 EOS 分隔符）。
 
     Args:
         item_seq:     用户交互的 item ID 列表，如 [3, 17, 42, ...]
@@ -58,10 +53,11 @@ def seq_to_tokens(item_seq, semantic_ids, maxlen=50):
         maxlen:       最多保留最近多少个 item
 
     Returns:
-        token 列表，如 [276, 2, 5, 22, 0, 4, 20, ...]
+        token 列表，如 [276, 2, 5, 22, 277, 0, 4, 20, 277, ...]
     """
     tokens = [BOS_TOKEN]
     for item_id in item_seq[-maxlen:]:
         if item_id in semantic_ids:
             tokens.extend(item_to_tokens(semantic_ids[item_id]))
+            tokens.append(EOS_TOKEN)
     return tokens

@@ -23,10 +23,10 @@ from tqdm import tqdm
 
 from model.generative_rec import build_model
 from model.inference import build_reverse_index, predict_topk
-from model.tokenizer import seq_to_tokens
 
 K_LIST     = [5, 10]    # 与 TIGER 论文一致：Recall@5, @10, NDCG@5, @10
 BEAM_WIDTH = 50         # beam search 宽度，越大越准但越慢
+ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae.npy'
 
 
 def compute_metrics(recommended_items, target, k_list):
@@ -105,12 +105,18 @@ if __name__ == '__main__':
     np.random.seed(42)
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    device   = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if torch.cuda.is_available():
+        device = 'cuda'
+    elif torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
     print(f'使用设备: {device}')
 
     # 加载数据
     data         = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
-    semantic_ids = np.load(os.path.join(base_dir, 'embedding/semantic_ids.npy'),
+    # Active Semantic ID file: RQ-VAE on top of nomic embeddings.
+    semantic_ids = np.load(os.path.join(base_dir, 'embedding', ACTIVE_SEMANTIC_IDS),
                            allow_pickle=True).item()
 
     # 加载模型

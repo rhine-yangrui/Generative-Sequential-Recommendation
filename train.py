@@ -8,8 +8,8 @@
 """
 
 import os
-import math
 import pickle
+import random as _random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,10 +17,10 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 
 from model.tokenizer import (
-    seq_to_tokens, item_to_tokens, tokens_to_semantic_id,
-    VOCAB_SIZE, PAD_TOKEN, BOS_TOKEN
+    seq_to_tokens, item_to_tokens, VOCAB_SIZE, PAD_TOKEN
 )
 from model.generative_rec import build_model, count_parameters
+from model.inference import build_reverse_index, predict_topk
 
 # ── 超参数 ────────────────────────────────────────────────────────────────
 CONFIG = {
@@ -28,10 +28,12 @@ CONFIG = {
     'batch_size':  128,     # 滑动窗口后样本量大幅增加，可用更大 batch
     'lr':          1e-3,
     'num_epochs':  30,      # 样本多了不需要那么多 epoch
-    'val_every':   3,
-    'patience':    10,      # early stopping：val loss 连续多少次不降则停止
+    'val_every':   5,       # beam search 验证更慢，降低验证频率
+    'patience':    6,       # 连续 6 次 val Recall@10 不提升则停止
 }
 # ─────────────────────────────────────────────────────────────────────────
+
+ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae.npy'
 
 
 class RecDataset(Dataset):
@@ -46,7 +48,7 @@ class RecDataset(Dataset):
     augment=False（验证集）：
       每个用户只预测最后一个 item（与测试集评估方式一致）。
 
-    训练只对最后 3 个 token（目标 item 的 c1/c2/c3）计算 loss，
+    训练只对最后 3 个 token（目标 item 的 c1/c2/c3，不含 EOS）计算 loss，
     历史部分的 loss 用 -100 mask 掉。
     """
     def __init__(self, user_seqs, semantic_ids, maxlen=50, augment=True):
@@ -67,6 +69,8 @@ class RecDataset(Dataset):
                     history      = seq[:t]
                     input_tokens = seq_to_tokens(history, semantic_ids, maxlen)
                     target_tokens = item_to_tokens(semantic_ids[target_item])
+                    # full_tokens = [BOS, ..., c1^T, c2^T, c3^T]
+                    # target 不追加 EOS，只监督 3 个 code token。
                     full_tokens  = input_tokens + target_tokens
                     self.samples.append((full_tokens, len(input_tokens)))
             else:
@@ -77,6 +81,8 @@ class RecDataset(Dataset):
                     continue
                 input_tokens  = seq_to_tokens(seq[:-1], semantic_ids, maxlen)
                 target_tokens = item_to_tokens(semantic_ids[target_item])
+                # full_tokens = [BOS, ..., c1^T, c2^T, c3^T]
+                # target 不追加 EOS，只监督 3 个 code token。
                 full_tokens   = input_tokens + target_tokens
                 self.samples.append((full_tokens, len(input_tokens)))
 
@@ -111,19 +117,32 @@ def collate_fn(batch):
     return input_ids, labels
 
 
-def evaluate_val_loss(model, val_loader, device):
+def evaluate_recall_subset(model, val_seqs, semantic_ids, device,
+                           k=10, n_users=500, beam_width=20):
+    """
+    在 val 集随机子集上计算 Recall@10，用于 early stopping。
+    """
+    sid_to_item, sid_array, item_id_list = build_reverse_index(semantic_ids)
     model.eval()
-    total_loss = 0.0
-    n_batches  = 0
+    users = list(val_seqs.keys())
+    sampled = _random.sample(users, min(n_users, len(users)))
+    hits = 0
+
     with torch.no_grad():
-        for input_ids, labels in val_loader:
-            input_ids = input_ids.to(device)
-            labels    = labels.to(device)
-            outputs   = model(input_ids=input_ids, labels=labels)
-            total_loss += outputs.loss.item()
-            n_batches  += 1
+        for user in sampled:
+            full_seq = val_seqs[user]
+            target = full_seq[-1]
+            history = full_seq[:-1]
+
+            recs = predict_topk(
+                model, history, semantic_ids, sid_to_item, sid_array,
+                item_id_list, k=k, beam_width=beam_width, device=device
+            )
+            if target in recs:
+                hits += 1
+
     model.train()
-    return total_loss / n_batches if n_batches > 0 else float('inf')
+    return hits / len(sampled) if sampled else 0.0
 
 
 def train():
@@ -139,7 +158,8 @@ def train():
     # ── 加载数据 ──────────────────────────────────────────────────────────
     base_dir     = os.path.dirname(os.path.abspath(__file__))
     data         = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
-    semantic_ids = np.load(os.path.join(base_dir, 'embedding/semantic_ids.npy'),
+    # Active Semantic ID file: RQ-VAE on top of nomic embeddings.
+    semantic_ids = np.load(os.path.join(base_dir, 'embedding', ACTIVE_SEMANTIC_IDS),
                            allow_pickle=True).item()
 
     train_seqs = data['train']
@@ -157,9 +177,6 @@ def train():
 
     train_loader = DataLoader(train_dataset, batch_size=CONFIG['batch_size'],
                               shuffle=True,  collate_fn=collate_fn, num_workers=2)
-    val_loader   = DataLoader(val_dataset,   batch_size=CONFIG['batch_size'],
-                              shuffle=False, collate_fn=collate_fn, num_workers=2)
-
     # ── 模型 ──────────────────────────────────────────────────────────────
     model = build_model().to(device)
     print(f'\n模型参数量: {count_parameters(model) / 1e6:.1f}M')
@@ -171,7 +188,7 @@ def train():
 
     # ── 训练循环 ──────────────────────────────────────────────────────────
     os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
-    best_val_loss  = float('inf')
+    best_val_recall = 0.0
     patience_count = 0
 
     print(f'\n开始训练，共 {CONFIG["num_epochs"]} epochs\n')
@@ -197,28 +214,33 @@ def train():
         avg_train_loss = total_loss / len(train_loader)
 
         if epoch % CONFIG['val_every'] == 0 or epoch == 1:
-            val_loss = evaluate_val_loss(model, val_loader, device)
+            val_recall = evaluate_recall_subset(
+                model, val_seqs, semantic_ids, device, n_users=500, beam_width=20
+            )
             print(f'Epoch {epoch:3d}/{CONFIG["num_epochs"]}  '
-                  f'train_loss={avg_train_loss:.4f}  val_loss={val_loss:.4f}  '
+                  f'train_loss={avg_train_loss:.4f}  val_Recall@10={val_recall:.4f}  '
                   f'lr={scheduler.get_last_lr()[0]:.2e}')
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            if val_recall > best_val_recall:
+                best_val_recall = val_recall
                 patience_count = 0
                 torch.save(model.state_dict(),
                            os.path.join(base_dir, 'checkpoints/best_model.pt'))
-                print(f'  ✓ 保存最优模型 (val_loss={best_val_loss:.4f})')
+                print(f'  ✓ 保存最优模型 (val_Recall@10={best_val_recall:.4f})')
             else:
                 patience_count += 1
                 if patience_count >= CONFIG['patience']:
-                    print(f'\nEarly stopping（连续 {CONFIG["patience"]} 次 val loss 未下降）')
+                    print(f'\nEarly stopping（连续 {CONFIG["patience"]} 次 val Recall@10 未提升）')
                     break
         else:
             print(f'Epoch {epoch:3d}/{CONFIG["num_epochs"]}  train_loss={avg_train_loss:.4f}')
 
-    print(f'\n训练完成，最优 val_loss={best_val_loss:.4f}')
+    print(f'\n训练完成，最优 val_Recall@10={best_val_recall:.4f}')
     print(f'模型已保存至 checkpoints/best_model.pt')
 
 
 if __name__ == '__main__':
+    _random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
     train()
