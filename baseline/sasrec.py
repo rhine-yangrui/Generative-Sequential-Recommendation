@@ -70,11 +70,12 @@ class SASRec(nn.Module):
         causal_mask = torch.triu(
             torch.ones(L, L, device=item_seq.device, dtype=torch.bool), diagonal=1)
 
-        # padding 掩码：padding 位置不参与 attention
-        pad_mask = (item_seq == 0)
-
-        x = self.transformer(x, mask=causal_mask, src_key_padding_mask=pad_mask,
-                             is_causal=True)
+        # 不使用 src_key_padding_mask：当某行真实 item 很少时，
+        # pad 位置会出现 "所有 key 都被 mask" 的情况，softmax 全 -inf → NaN，
+        # 并通过下一层 attention 的 0*NaN 渗到最后一位。
+        # SASRec 原版做法：靠 padding_idx=0 让 pad 位置 embedding 为 0，
+        # pad 位置产生的 representation 是噪声但不影响最后一位的读出。
+        x = self.transformer(x, mask=causal_mask, is_causal=True)
 
         # 左对齐后，最后一个位置始终是最近的有效 item
         seq_emb = x[:, -1, :]  # (B, hidden_size)
