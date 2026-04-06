@@ -56,11 +56,11 @@ Beam search generates top-K recommendations; check if ground truth is in top-K.
 |-------|----------|--------|-----------|---------|
 | SASRec (TIGER paper) | 0.0387 | 0.0249 | 0.0605 | 0.0318 |
 | TIGER (original paper) | 0.0454 | 0.0321 | 0.0648 | 0.0384 |
-| **SASRec (ours, all-rank)** | TBD | TBD | TBD | TBD |
+| **SASRec (ours, all-rank)** | 0.0222 | 0.0114 | 0.0404 | 0.0172 |
 | Generative + Random ID (ablation) | TBD | TBD | TBD | TBD |
 | **Generative + nomic-embed-text** | TBD | TBD | TBD | TBD |
 
-> Target: surpass SASRec Recall@10 ≈ 0.06. The ablation (random ID vs. LLM Semantic ID) proves the value of semantic structure.
+> Latest SASRec run: best val Recall@10 = 0.0543. Current target remains to close the gap to TIGER's SASRec Recall@10 = 0.0605.
 
 ---
 
@@ -89,13 +89,15 @@ Beam search generates top-K recommendations; check if ground truth is in top-K.
 | Hyperparameter | Value | Note |
 |----------------|-------|------|
 | Architecture | Transformer Encoder | self-attentive, causal mask |
-| hidden_size | 64 | |
+| maxlen | 50 | max history length |
+| hidden_size | 128 | latest reported run |
 | num_layers | 2 | |
 | num_heads | 1 | |
-| dropout | 0.2 | |
+| dropout | 0.5 | latest reported run |
 | Loss | BPR | 1 negative sample per positive |
 | Optimizer | Adam | lr=1e-3 |
 | Epochs | 200 | early stopping, patience=20 |
+| Validation | every 10 epochs | model selection by Recall@10 |
 | Batch size | 256 | |
 
 ### Semantic ID Construction

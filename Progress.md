@@ -31,7 +31,7 @@
 | E1 | K-means + 距离排序 | qwen2:7b (3584d) | 4/64/256 | 30 | 0.0197 | 0.0122 | 0.0322 | 0.0162 | beam=50 |
 | E1b | 同上 | 同上 | 同上 | 同上 | 0.0198 | 0.0122 | 0.0330 | 0.0165 | beam=100，提升微乎其微 |
 | E2 | K-means + 随机 ID（消融） | — | 4/64/256 | 30 | 0.0025 | 0.0016 | 0.0042 | 0.0021 | 对照组；LLM vs Random +0.0280 |
-| E3 | SASRec baseline（修复后） | — | — | 200 epochs | 0.0202 | 0.0116 | 0.0381 | 0.0174 | val best=0.0487；test 最终值 |
+| E3 | SASRec baseline（修复后） | — | — | 200 epochs | 0.0222 | 0.0114 | 0.0404 | 0.0172 | val best=0.0543；hidden=128，dropout=0.5 |
 | E4 | RQ-VAE | nomic-embed-text (768d) | 4/16/256 | TBD | — | — | — | — | 计划中 |
 
 ---
@@ -92,20 +92,23 @@
 - Bug 4：Adam 加 `weight_decay=1e-4`
 
 **设置**
+- maxlen=50，hidden_size=128，num_layers=2，num_heads=1，dropout=0.5
+- Adam，lr=1e-3，batch_size=256，num_neg=1
 - BPR loss，patience=20（每 10 epoch 在 val 集评估）
-- 200 epochs 跑满，最优 val Recall@10=0.0487（epoch 140）
+- 200 epochs 跑满，最优 val Recall@10=0.0543
 - 最终在 test 集评估（加载 best checkpoint）
 
 **结果（test 集）**
-- Recall@5=0.0202，NDCG@5=0.0116
-- Recall@10=0.0381，NDCG@10=0.0174
+- Recall@5=0.0222，NDCG@5=0.0114
+- Recall@10=0.0404，NDCG@10=0.0172
 
 **分析**
-- 相比初版（0.0136）提升 2.8×，Bug 1（滑动窗口）是主要贡献
+- 相比上一版记录（Recall@10=0.0381），Recall@10 进一步提升到 0.0404，best val Recall@10 提升到 0.0543
+- 相比初版（0.0136）提升约 2.97×，Bug 1（滑动窗口）仍是主要贡献
 - 与论文参考值（0.0605）仍有差距，原因：
-  1. hidden_size=64 较小（论文通常用 256）
+  1. hidden_size=128，仍低于论文常用的更大配置（通常为 256）
   2. 超参数未做 grid search
-  3. 我们的生成式模型（0.0322）与本 SASRec（0.0381）量级相近，说明两者目前处于同一水平
+  3. 我们的生成式模型（0.0322）与本 SASRec（0.0404）仍处于同一量级，但 SASRec 仍领先 0.0082
 
 ---
 
