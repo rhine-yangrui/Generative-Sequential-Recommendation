@@ -31,7 +31,7 @@
 | E1 | K-means + 距离排序 | qwen2:7b (3584d) | 4/64/256 | 30 | 0.0197 | 0.0122 | 0.0322 | 0.0162 | beam=50 |
 | E1b | 同上 | 同上 | 同上 | 同上 | 0.0198 | 0.0122 | 0.0330 | 0.0165 | beam=100，提升微乎其微 |
 | E2 | K-means + 随机 ID（消融） | — | 4/64/256 | 30 | 0.0025 | 0.0016 | 0.0042 | 0.0021 | 对照组；LLM vs Random +0.0280 |
-| E3 | SASRec baseline（本实现） | — | — | early-stop | 0.0073 | 0.0038 | 0.0136 | 0.0059 | 远低于论文参考值，见分析 |
+| E3 | SASRec baseline（修复后） | — | — | 200 epochs | 0.0202 | 0.0116 | 0.0381 | 0.0174 | val best=0.0487；test 最终值 |
 | E4 | RQ-VAE | nomic-embed-text (768d) | 4/16/256 | TBD | — | — | — | — | 计划中 |
 
 ---
@@ -83,26 +83,29 @@
 
 ---
 
-### E3：SASRec baseline（本实现）
+### E3：SASRec baseline（修复后）
+
+**修复内容（相比初版）**
+- Bug 1：滑动窗口训练（每用户生成所有位置的样本，~22K → ~110K+ 样本）
+- Bug 2：左填充 + `x[:,-1,:]` 取表示（位置对齐 train/eval 一致）
+- Bug 3：early stopping 改用 val 集（修复 test 泄露）
+- Bug 4：Adam 加 `weight_decay=1e-4`
 
 **设置**
-- BPR loss，early stopping on Recall@10（patience=10）
-- All-rank 评估：对所有 item 打分，取 top-K
+- BPR loss，patience=20（每 10 epoch 在 val 集评估）
+- 200 epochs 跑满，最优 val Recall@10=0.0487（epoch 140）
+- 最终在 test 集评估（加载 best checkpoint）
 
-**结果**
-- Recall@5=0.0073，NDCG@5=0.0038
-- Recall@10=0.0136，NDCG@10=0.0059
+**结果（test 集）**
+- Recall@5=0.0202，NDCG@5=0.0116
+- Recall@10=0.0381，NDCG@10=0.0174
 
-**分析：远低于论文参考值（0.0605）**
-
-本实现 SASRec 与论文差距约 4.5×，可能原因：
-
-1. **all-rank 评估本身就更难**：TIGER 论文 SASRec 的 0.0605 是否也是 all-rank，还是使用了 negative sampling 评估，需核实
-2. **超参数未调优**：TIGER 论文中 SASRec 经过精细调参（hidden_dim, num_blocks, dropout, lr 等）；本实现使用默认参数
-3. **序列截断策略**：maxlen=50，与论文设置可能不同
-4. **BPR 负采样**：负样本数量、采样策略影响收敛质量
-
-> 注：E3 结果不可直接作为基线与论文比较，但可作为内部对照（本项目生成式模型 0.0322 > 本项目 SASRec 0.0136）
+**分析**
+- 相比初版（0.0136）提升 2.8×，Bug 1（滑动窗口）是主要贡献
+- 与论文参考值（0.0605）仍有差距，原因：
+  1. hidden_size=64 较小（论文通常用 256）
+  2. 超参数未做 grid search
+  3. 我们的生成式模型（0.0322）与本 SASRec（0.0381）量级相近，说明两者目前处于同一水平
 
 ---
 

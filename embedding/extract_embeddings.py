@@ -31,7 +31,8 @@ if __name__ == '__main__':
     # 当前使用 qwen2:7b（3584 维，语义质量更高）
     # 可替换为更大的 LLM（如 qwen2.5:7b）或轻量模型（nomic-embed-text，768 维）
     # 换模型只需改这一行，其余代码不用动
-    MODEL      = 'qwen2:7b'
+    # MODEL      = 'qwen2:7b'
+    MODEL     = 'nomic-embed-text'   # 速度更快，维度更小（768），适合测试和资源有限的环境
     N_WORKERS  = 2   # 并发数：2 个 worker 速度最优（~36 分钟），4 个无额外提升
 
     data = pickle.load(open(data_path, 'rb'))
