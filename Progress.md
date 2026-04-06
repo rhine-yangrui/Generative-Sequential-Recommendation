@@ -33,7 +33,7 @@
 | E2 | K-means + 随机 ID（消融） | — | 4/64/256 | 30 | 0.0025 | 0.0016 | 0.0042 | 0.0021 | 对照组；LLM vs Random +0.0280 |
 | E3 | SASRec baseline（修复后） | — | — | 200 epochs | 0.0222 | 0.0114 | 0.0404 | 0.0172 | val best=0.0543；hidden=128，dropout=0.5，wd=1e-4 |
 | E3b | SASRec baseline（调参） | — | — | 400 epochs | 0.0358 | 0.0180 | 0.0573 | 0.0250 | val best Recall@10=0.0730；hidden=128，dropout=0.5，wd=0，val_every=5 |
-| E4 | RQ-VAE (+c4 collision) | nomic-embed-text (768d) | 4/16/256(+512) | 50+300 | TBD | TBD | TBD | TBD | unique_rate=41.2%（容量瓶颈，详见下文与 RQVAE_Analysis.md） |
+| E4 | RQ-VAE (+c4 collision) | nomic-embed-text (768d) | 4/16/256(+512) | 50+300 | TBD | TBD | TBD | TBD | unique_rate=41.2%（容量瓶颈，详见下文） |
 
 ---
 
@@ -152,7 +152,7 @@
 - 冲突组数 = 2568，最大冲突组 = 24（c4 容量 512，安全）
 - recon ≈ 2e-4，rq ≈ 1e-4
 
-**分析（详见 RQVAE_Analysis.md）**
+**分析**
 - 41% unique 不是 codebook collapse，而是 **容量瓶颈**：
   `4 × 16 × 256 = 16384` 个联合槽位，对 12,101 个 item 来说残差量化稍微非均匀就会大量碰撞。
 - 加 c4 后所有 12,101 个 item 都能拿到唯一 4-tuple，下游训练可以照常进行。

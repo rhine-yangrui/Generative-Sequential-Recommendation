@@ -8,8 +8,7 @@ The repo has three layers of information:
 
 - Current code path: what the scripts do today (this README).
 - Recorded experiments: numbers in [Progress.md](./Progress.md).
-- Outstanding issues: critique in [RQVAE_Analysis.md](./RQVAE_Analysis.md)
-  and the legacy plan stub in [improve_generative_prompt.md](./improve_generative_prompt.md).
+- Outstanding issues: [improve_generative_prompt.md](./improve_generative_prompt.md).
 
 ## Current Code Path
 
@@ -73,8 +72,9 @@ The current RQ-VAE setup `[4,16,256]` only reaches **unique_rate ≈ 41%**
 on Beauty's 12,101 items (max collision group 24). All three codebooks are
 fully used, so this is a capacity ceiling, not collapse: `4 × 16 × 256 = 16384`
 joint slots are too few once the residual quantization is non-uniform.
-[RQVAE_Analysis.md](./RQVAE_Analysis.md) discusses this in detail and
-recommends `[256,256,256]` if downstream metrics are unsatisfactory.
+See [improve_generative_prompt.md](./improve_generative_prompt.md) — the
+recommended fix is `K_LEVELS=[256,256,256]` if downstream metrics are
+unsatisfactory.
 
 ## Dataset
 

@@ -22,8 +22,7 @@ Before changing docs or code, treat the repository as having three distinct stat
 
 - `README.md`: should describe the current codebase accurately
 - `Progress.md`: is the experiment log and may include runs produced with settings not reflected in the current default scripts
-- `RQVAE_Analysis.md`: critique of the current RQ-VAE setup; describes the known capacity-ceiling issue
-- `improve_generative_prompt.md`: legacy planning doc, now reduced to a short TODO stub
+- `improve_generative_prompt.md`: outstanding TODOs (RQ-VAE capacity ceiling, c4 vocab shrink)
 
 Do not describe planned improvements as already implemented.
 
@@ -83,8 +82,7 @@ Note:
 - `evaluate.py`: generative evaluation entry point
 - `baseline/sasrec_train.py`: SASRec baseline
 - `Progress.md`: experiment record
-- `RQVAE_Analysis.md`: RQ-VAE critique / known issues
-- `improve_generative_prompt.md`: legacy TODO stub
+- `improve_generative_prompt.md`: outstanding TODOs
 
 ## Artifact Naming Notes
 
@@ -113,4 +111,4 @@ Be careful not to confuse archived artifacts with the paths hardcoded in the act
 - keep docs aligned with the current code
 - preserve `Progress.md` as the experiment ledger
 - run downstream `train.py` / `evaluate.py` on the current RQ-VAE IDs (unique_rate ≈ 41%)
-- if downstream Recall@10 underperforms SASRec, switch RQ-VAE to `K_LEVELS=[256,256,256]` (see `RQVAE_Analysis.md`)
+- if downstream Recall@10 underperforms SASRec, switch RQ-VAE to `K_LEVELS=[256,256,256]` (see `improve_generative_prompt.md`)
