@@ -108,7 +108,7 @@ Recorded results from completed runs:
 | TIGER (paper) | 0.0454 | 0.0321 | 0.0648 | 0.0384 | reference |
 | Generative + qwen2:7b + `4/64/256` | 0.0197 | 0.0122 | 0.0322 | 0.0162 | completed |
 | Generative + Random ID ablation | 0.0025 | 0.0016 | 0.0042 | 0.0021 | completed |
-| SASRec baseline (latest recorded run) | 0.0222 | 0.0114 | 0.0404 | 0.0172 | completed |
+| SASRec baseline (latest recorded run) | 0.0358 | 0.0180 | 0.0573 | 0.0250 | completed; dropout=0.5, wd=0, 400 ep, val best Recall@10=0.0730 |
 | Generative + default nomic pipeline | TBD | TBD | TBD | TBD | next active direction |
 
 Important note:

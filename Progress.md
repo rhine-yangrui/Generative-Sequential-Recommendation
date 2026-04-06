@@ -31,7 +31,8 @@
 | E1 | K-means + 距离排序 | qwen2:7b (3584d) | 4/64/256 | 30 | 0.0197 | 0.0122 | 0.0322 | 0.0162 | beam=50 |
 | E1b | 同上 | 同上 | 同上 | 同上 | 0.0198 | 0.0122 | 0.0330 | 0.0165 | beam=100，提升微乎其微 |
 | E2 | K-means + 随机 ID（消融） | — | 4/64/256 | 30 | 0.0025 | 0.0016 | 0.0042 | 0.0021 | 对照组；LLM vs Random +0.0280 |
-| E3 | SASRec baseline（修复后） | — | — | 200 epochs | 0.0222 | 0.0114 | 0.0404 | 0.0172 | val best=0.0543；hidden=128，dropout=0.5 |
+| E3 | SASRec baseline（修复后） | — | — | 200 epochs | 0.0222 | 0.0114 | 0.0404 | 0.0172 | val best=0.0543；hidden=128，dropout=0.5，wd=1e-4 |
+| E3b | SASRec baseline（调参） | — | — | 400 epochs | 0.0358 | 0.0180 | 0.0573 | 0.0250 | val best Recall@10=0.0730；hidden=128，dropout=0.5，wd=0，val_every=5 |
 | E4 | RQ-VAE | nomic-embed-text (768d) | 4/16/256 | TBD | — | — | — | — | 计划中 |
 
 ---
@@ -105,10 +106,31 @@
 **分析**
 - 相比上一版记录（Recall@10=0.0381），Recall@10 进一步提升到 0.0404，best val Recall@10 提升到 0.0543
 - 相比初版（0.0136）提升约 2.97×，Bug 1（滑动窗口）仍是主要贡献
-- 与论文参考值（0.0605）仍有差距，原因：
-  1. hidden_size=128，仍低于论文常用的更大配置（通常为 256）
-  2. 超参数未做 grid search
-  3. 我们的生成式模型（0.0322）与本 SASRec（0.0404）仍处于同一量级，但 SASRec 仍领先 0.0082
+
+---
+
+### E3b：SASRec baseline（调参版）
+
+**动机**
+- E3 还在过拟合（train loss 持续下降但 val 早早停滞），需要更强正则
+- 关闭 weight_decay，更频繁评估以减小 early-stop 的 selection 噪声
+
+**修复 / 改动**
+- `weight_decay`：1e-4 → 0
+- `val_every`：10 → 5
+- `num_epochs`：200 → 400，`patience` 保持 20
+- 其他 hidden=128 / dropout=0.5 不变
+
+**结果（test 集）**
+- Recall@5=0.0358，NDCG@5=0.0180
+- Recall@10=0.0573，NDCG@10=0.0250
+- val best Recall@10=0.0730（epoch 370）
+
+**分析**
+- test Recall@10 由 0.0404 → 0.0573，已经接近论文 0.0605
+- val (0.0730) 仍显著高于 test (0.0573)，gap ~21%；val 曲线在 epoch 300+ 后纯震荡，说明 early stopping 选到了"运气尖峰"，存在 selection bias
+- 后续可在 val 上做平滑（取最近 N 次平均）来缓解；或检查 `data/data_process.py` 是否标准 leave-one-out
+- 超参已较为合理，再加 epoch 收益预计极小，下一步应回到生成式主路径
 
 ---
 
