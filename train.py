@@ -7,6 +7,7 @@
 训练完成后模型保存至 checkpoints/best_model_t5_{num_epochs}ep.pt
 """
 
+import math
 import os
 import pickle
 import random as _random
@@ -26,9 +27,10 @@ CONFIG = {
     'maxlen':      20,
     'batch_size':  256,
     'lr':          1e-4,
-    'num_epochs':  200,
-    'val_every':   10,
-    'patience':    6,
+    'num_epochs':  100,
+    'val_every':   2,       # 全量 val 较慢，每 2 epoch 评估一次
+    'patience':    10,      # 对齐 TIGER
+    'val_beam':    30,      # 对齐 TIGER 训练评估 beam_size
 }
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -98,30 +100,36 @@ def collate_fn(batch):
     return input_ids, attention_mask, labels
 
 
-def evaluate_recall_subset(model, val_seqs, semantic_ids, device,
-                           k=10, n_users=500, beam_width=20):
-    """val 子集 Recall@k，用于 early stopping。"""
+def evaluate_full_val(model, val_seqs, semantic_ids, device,
+                      k=10, beam_width=30):
+    """
+    全量 val 评估，对齐 TIGER：固定顺序、所有用户、与 test 一致的 beam。
+    返回 (Recall@k, NDCG@k)。
+    """
     sid_to_item, sid_array, item_id_list = build_reverse_index(semantic_ids)
     model.eval()
-    users   = list(val_seqs.keys())
-    sampled = _random.sample(users, min(n_users, len(users)))
-    hits    = 0
+
+    recalls = 0
+    ndcgs   = 0.0
+    n       = 0
 
     with torch.no_grad():
-        for user in sampled:
-            full_seq = val_seqs[user]
-            target   = full_seq[-1]
-            history  = full_seq[:-1]
+        for user, full_seq in val_seqs.items():
+            target  = full_seq[-1]
+            history = full_seq[:-1]
 
             recs = predict_topk(
                 model, history, semantic_ids, sid_to_item, sid_array,
                 item_id_list, k=k, beam_width=beam_width, device=device
             )
+            n += 1
             if target in recs:
-                hits += 1
+                rank = recs.index(target) + 1
+                recalls += 1
+                ndcgs   += 1.0 / math.log2(rank + 1)
 
     model.train()
-    return hits / len(sampled) if sampled else 0.0
+    return (recalls / n, ndcgs / n) if n else (0.0, 0.0)
 
 
 def train():
@@ -157,14 +165,15 @@ def train():
     print(f'\n模型参数量: {count_parameters(model) / 1e6:.1f}M')
     print(f'词表大小: {VOCAB_SIZE}')
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG['lr'], weight_decay=0.01)
+    # 对齐 TIGER：Adam，无 weight_decay
+    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=CONFIG['num_epochs'], eta_min=1e-5)
 
     os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
     ckpt_path = os.path.join(base_dir, f'checkpoints/best_model_t5_{CONFIG["num_epochs"]}ep.pt')
-    best_val_recall = 0.0
-    patience_count  = 0
+    best_val_ndcg  = 0.0
+    patience_count = 0
 
     print(f'\n开始训练，共 {CONFIG["num_epochs"]} epochs\n')
     for epoch in range(1, CONFIG['num_epochs'] + 1):
@@ -192,18 +201,20 @@ def train():
         avg_train_loss = total_loss / len(train_loader)
 
         if epoch % CONFIG['val_every'] == 0 or epoch == 1:
-            val_recall = evaluate_recall_subset(
-                model, val_seqs, semantic_ids, device, n_users=500, beam_width=20
+            val_recall, val_ndcg = evaluate_full_val(
+                model, val_seqs, semantic_ids, device,
+                k=10, beam_width=CONFIG['val_beam']
             )
             print(f'Epoch {epoch:3d}/{CONFIG["num_epochs"]}  '
-                  f'train_loss={avg_train_loss:.4f}  val_Recall@10={val_recall:.4f}  '
+                  f'train_loss={avg_train_loss:.4f}  '
+                  f'val_R@10={val_recall:.4f}  val_N@10={val_ndcg:.4f}  '
                   f'lr={scheduler.get_last_lr()[0]:.2e}')
 
-            if val_recall > best_val_recall:
-                best_val_recall = val_recall
-                patience_count  = 0
+            if val_ndcg > best_val_ndcg:
+                best_val_ndcg  = val_ndcg
+                patience_count = 0
                 torch.save(model.state_dict(), ckpt_path)
-                print(f'  ✓ 保存最优模型 (val_Recall@10={best_val_recall:.4f})')
+                print(f'  ✓ 保存最优模型 (val_N@10={best_val_ndcg:.4f})')
             else:
                 patience_count += 1
                 if patience_count >= CONFIG['patience']:
@@ -212,7 +223,7 @@ def train():
         else:
             print(f'Epoch {epoch:3d}/{CONFIG["num_epochs"]}  train_loss={avg_train_loss:.4f}')
 
-    print(f'\n训练完成，最优 val_Recall@10={best_val_recall:.4f}')
+    print(f'\n训练完成，最优 val_NDCG@10={best_val_ndcg:.4f}')
     print(f'模型已保存至 {ckpt_path}')
 
 

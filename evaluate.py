@@ -121,7 +121,7 @@ if __name__ == '__main__':
 
     # 加载模型（可通过命令行参数指定 checkpoint：python evaluate.py checkpoints/xxx.pt）
     import sys
-    ckpt_rel = sys.argv[1] if len(sys.argv) > 1 else 'checkpoints/best_model_t5_200ep.pt'
+    ckpt_rel = sys.argv[1] if len(sys.argv) > 1 else 'checkpoints/best_model_t5_100ep.pt'
     ckpt_path = os.path.join(base_dir, ckpt_rel)
     model = build_model().to(device)
     model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
