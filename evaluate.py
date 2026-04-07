@@ -22,10 +22,11 @@ import torch
 from tqdm import tqdm
 
 from model.generative_rec import build_model
-from model.inference import build_reverse_index, predict_topk
+from model.inference import build_reverse_index, predict_topk_batch
 
 K_LIST     = [5, 10]    # 与 TIGER 论文一致：Recall@5, @10, NDCG@5, @10
 BEAM_WIDTH = 50         # beam search 宽度，越大越准但越慢
+BATCH_SIZE = 64         # 批量 beam search
 ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae.npy'
 
 
@@ -53,26 +54,41 @@ def compute_metrics(recommended_items, target, k_list):
 
 
 def evaluate(model, test_seqs, semantic_ids, sid_to_item, sid_array,
-             item_id_list, device, k_list=K_LIST, beam_width=BEAM_WIDTH):
+             item_id_list, device, k_list=K_LIST,
+             beam_width=BEAM_WIDTH, batch_size=BATCH_SIZE):
     """
-    All-rank 评估：不需要负采样，直接用 beam search 结果。
+    All-rank 评估：批量化 beam search，不做负采样。
     """
     model.eval()
     metrics = {k: {'Recall': [], 'NDCG': []} for k in k_list}
     max_k   = max(k_list)
 
-    for user, full_seq in tqdm(test_seqs.items(), desc='Evaluating'):
-        target  = full_seq[-1]
-        history = full_seq[:-1]
+    histories_buf = []
+    targets_buf   = []
+    pbar = tqdm(test_seqs.items(), desc='Evaluating')
 
-        recs = predict_topk(model, history, semantic_ids, sid_to_item,
-                            sid_array, item_id_list,
-                            k=max_k, beam_width=beam_width, device=device)
+    def _flush():
+        if not histories_buf:
+            return
+        results = predict_topk_batch(
+            model, histories_buf, semantic_ids, sid_to_item,
+            sid_array, item_id_list,
+            k=max_k, beam_width=beam_width, device=device,
+        )
+        for recs, target in zip(results, targets_buf):
+            result = compute_metrics(recs, target, k_list)
+            for k in k_list:
+                metrics[k]['Recall'].append(result[k]['Recall'])
+                metrics[k]['NDCG'].append(result[k]['NDCG'])
+        histories_buf.clear()
+        targets_buf.clear()
 
-        result = compute_metrics(recs, target, k_list)
-        for k in k_list:
-            metrics[k]['Recall'].append(result[k]['Recall'])
-            metrics[k]['NDCG'].append(result[k]['NDCG'])
+    for user, full_seq in pbar:
+        histories_buf.append(full_seq[:-1])
+        targets_buf.append(full_seq[-1])
+        if len(histories_buf) >= batch_size:
+            _flush()
+    _flush()
 
     return {k: {m: np.mean(v) for m, v in mv.items()} for k, mv in metrics.items()}
 
