@@ -55,18 +55,8 @@ def build_reverse_index(semantic_ids):
     return sid_to_item, sid_array, item_id_list
 
 
-def hamming_nearest(candidate_sid, sid_array, item_id_list, exclude_ids=None):
-    cand      = np.array(candidate_sid, dtype=np.int32)
-    distances = (sid_array != cand).sum(axis=1)
-    if exclude_ids:
-        for i, iid in enumerate(item_id_list):
-            if iid in exclude_ids:
-                distances[i] = 999
-    return item_id_list[distances.argmin()]
-
-
 def _decode_one(output_seq, sid_to_item, sid_array, item_id_list, k, seen_items):
-    """从一条 beam 输出还原 item_id；负责合法性检查、Hamming 兜底、去重。"""
+    """从一条 beam 输出还原 item_id；非法或未命中实际 item 直接丢弃（对齐 TIGER）。"""
     new_tokens = output_seq[1:1 + len(K_LEVELS)].tolist()
     if len(new_tokens) < len(K_LEVELS):
         return None
@@ -76,10 +66,7 @@ def _decode_one(output_seq, sid_to_item, sid_array, item_id_list, k, seen_items)
             return None
     except Exception:
         return None
-    item_id = sid_to_item.get(candidate_sid)
-    if item_id is None:
-        item_id = hamming_nearest(candidate_sid, sid_array, item_id_list, seen_items)
-    return item_id
+    return sid_to_item.get(candidate_sid)
 
 
 def predict_topk_batch(model, history_seqs, semantic_ids, sid_to_item,

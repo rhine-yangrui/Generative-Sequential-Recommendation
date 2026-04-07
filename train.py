@@ -27,7 +27,7 @@ CONFIG = {
     'maxlen':      20,
     'batch_size':  256,
     'lr':          1e-4,
-    'num_epochs':  100,
+    'num_epochs':  200,     # 对齐 TIGER；E8 (100ep+cosine) 证明在低 LR 下被截停
     'val_every':   2,       # 全量 val 较慢，每 2 epoch 评估一次
     'patience':    10,      # 对齐 TIGER
     'val_beam':    30,      # 对齐 TIGER 训练评估 beam_size
@@ -175,17 +175,20 @@ def train():
     val_dataset = RecDataset(val_seqs, semantic_ids, CONFIG['maxlen'], augment=False)
     print(f'  验证样本数: {len(val_dataset)}')
 
-    train_loader = DataLoader(train_dataset, batch_size=CONFIG['batch_size'],
-                              shuffle=True, collate_fn=collate_fn, num_workers=2)
+    train_loader = DataLoader(
+        train_dataset, batch_size=CONFIG['batch_size'],
+        shuffle=True, collate_fn=collate_fn,
+        num_workers=4, pin_memory=(device.type == 'cuda'),
+        persistent_workers=True,
+    )
 
     model = build_model().to(device)
     print(f'\n模型参数量: {count_parameters(model) / 1e6:.1f}M')
     print(f'词表大小: {VOCAB_SIZE}')
 
-    # 对齐 TIGER：Adam，无 weight_decay
+    # 对齐 TIGER：Adam，无 weight_decay，常数 LR（不用 scheduler）
+    # E8 教训：CosineAnnealingLR 把 LR 退到 1e-5 后 val 仍单调上升，纯被掐死
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=CONFIG['num_epochs'], eta_min=1e-5)
 
     os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
     ckpt_path = os.path.join(base_dir, f'checkpoints/best_model_t5_{CONFIG["num_epochs"]}ep.pt')
@@ -198,9 +201,9 @@ def train():
         total_loss = 0.0
 
         for input_ids, attention_mask, labels in train_loader:
-            input_ids      = input_ids.to(device)
-            attention_mask = attention_mask.to(device)
-            labels         = labels.to(device)
+            input_ids      = input_ids.to(device, non_blocking=True)
+            attention_mask = attention_mask.to(device, non_blocking=True)
+            labels         = labels.to(device, non_blocking=True)
 
             outputs = model(input_ids=input_ids,
                             attention_mask=attention_mask,
@@ -214,7 +217,6 @@ def train():
 
             total_loss += loss.item()
 
-        scheduler.step()
         avg_train_loss = total_loss / len(train_loader)
 
         if epoch % CONFIG['val_every'] == 0 or epoch == 1:
@@ -225,8 +227,7 @@ def train():
             )
             print(f'Epoch {epoch:3d}/{CONFIG["num_epochs"]}  '
                   f'train_loss={avg_train_loss:.4f}  '
-                  f'val_R@10={val_recall:.4f}  val_N@10={val_ndcg:.4f}  '
-                  f'lr={scheduler.get_last_lr()[0]:.2e}')
+                  f'val_R@10={val_recall:.4f}  val_N@10={val_ndcg:.4f}')
 
             if val_ndcg > best_val_ndcg:
                 best_val_ndcg  = val_ndcg
