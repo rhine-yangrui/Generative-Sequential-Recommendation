@@ -54,13 +54,13 @@ LR             = 1e-3
 WEIGHT_DECAY   = 1e-4
 BATCH_SIZE     = 1024
 WARMUP_EPOCHS  = 50         # linear LR warmup (TIGER 'linear' scheduler)
-NUM_EPOCHS     = 300        # E11 sanity; bump to 3000 for full TIGER schedule
+NUM_EPOCHS     = 3000       # E11b：对齐 TIGER 完整训练时长（E10 证实 3000ep 在 nomic 上带来 +0.008 R@10）
 EVAL_EVERY     = 50         # TIGER default
 MAX_GRAD_NORM  = 1.0
 
 # ── Input / output ───────────────────────────────────────────────────────
 EMBEDDING_FILE = 'item_embeddings_raw_t5.npy'
-OUTPUT_TAG     = 't5_300ep'
+OUTPUT_TAG     = 't5_3kep'
 
 
 # ─────────────────────────────────────────────────────────────────────────
