@@ -30,7 +30,7 @@ def build_model(n_embd=256, n_layer=4, n_head=4):
         n_embd=n_embd,
         n_layer=n_layer,
         n_head=n_head,
-        n_positions=512,         # 1 BOS + 5*maxlen items (4 codes + EOS) = 251 max
+        n_positions=512,         # 1 BOS + 5*maxlen items (4 codes + EOS); maxlen=20 → ~106
         bos_token_id=BOS_TOKEN,
         eos_token_id=EOS_TOKEN,
         pad_token_id=PAD_TOKEN,

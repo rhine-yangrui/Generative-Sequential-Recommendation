@@ -52,7 +52,7 @@ class RecDataset(Dataset):
     训练只对最后 TARGET_LEN 个 token（目标 item 的 Semantic ID，不含 EOS）计算 loss，
     历史部分的 loss 用 -100 mask 掉。
     """
-    def __init__(self, user_seqs, semantic_ids, maxlen=50, augment=True):
+    def __init__(self, user_seqs, semantic_ids, maxlen=20, augment=True):
         self.samples = []
         skipped = 0
 

@@ -38,7 +38,7 @@ def tokens_to_semantic_id(tokens):
     return tuple(token - LEVEL_OFFSETS[level] for level, token in enumerate(tokens))
 
 
-def seq_to_tokens(item_seq, semantic_ids, maxlen=50):
+def seq_to_tokens(item_seq, semantic_ids, maxlen=20):
     """
     把用户的 item ID 序列转成 token 序列（含 BOS，每个 item 后加 EOS 分隔符）。
 

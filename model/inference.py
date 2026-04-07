@@ -90,7 +90,7 @@ def predict_topk(model, history_seq, semantic_ids, sid_to_item,
         recommended_items: list of item_id，长度 ≤ k
     """
     model.eval()
-    input_tokens = seq_to_tokens(history_seq, semantic_ids, maxlen=50)
+    input_tokens = seq_to_tokens(history_seq, semantic_ids, maxlen=20)
     input_ids    = torch.tensor(input_tokens, dtype=torch.long).unsqueeze(0).to(device)
     input_len    = len(input_tokens)
 
