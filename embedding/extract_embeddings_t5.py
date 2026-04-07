@@ -5,7 +5,7 @@ Sentence-T5 embedding extraction (对齐 TIGER 参考实现)。
 与 TIGER 论文 / 参考实现使用的 embedding 来源一致。
 
 输入:   data/beauty_data.pkl
-输出:   embedding/item_embeddings_raw_t5.npy
+输出:   embedding/item_embeddings_raw_st5.npy
 
 用法:
     pip install sentence-transformers
@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 MODEL_NAME   = 'sentence-transformers/sentence-t5-base'
 BATCH_SIZE   = 64
-OUTPUT_NAME  = 'item_embeddings_raw_t5.npy'
+OUTPUT_NAME  = 'item_embeddings_raw_st5.npy'
 
 
 def build_item_prompt(meta):

@@ -16,12 +16,12 @@ The repo has three layers of information:
 
 1. `data/data_process.py` → `beauty_data.pkl`
 2. `embedding/extract_embeddings.py` (default `nomic-embed-text`)
-   → `embedding/item_embeddings_raw.npy`
+   → `embedding/item_embeddings_raw_nomic.npy`
 3. `embedding/rqvae.py` trains the RQ-VAE on the nomic embeddings
-   → `checkpoints/rqvae_best.pt`
+   → `checkpoints/rqvae_{embed}_{rqvae_epochs}_best_{loss,collision}.pt`
 4. `embedding/generate_rqvae_ids.py` loads the best checkpoint, runs argmin
    quantization, resolves collisions with a 4th code
-   → `embedding/semantic_ids_rqvae.npy`
+   → `embedding/semantic_ids_rqvae_{embed}_{rqvae_epochs}.npy`
 5. `train.py` trains a from-scratch GPT-2 decoder; early stopping on
    validation Recall@10 → `checkpoints/best_model.pt`
 6. `evaluate.py` runs all-rank Recall@K / NDCG@K on the test set.

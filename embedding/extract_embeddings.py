@@ -26,7 +26,7 @@ Represent this product for semantic retrieval."""
 if __name__ == '__main__':
     base_dir    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_path   = os.path.join(base_dir, 'data', 'beauty_data.pkl')
-    output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'item_embeddings_raw.npy')
+    output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'item_embeddings_raw_nomic.npy')
 
     # 当前使用 qwen2:7b（3584 维，语义质量更高）
     # 可替换为更大的 LLM（如 qwen2.5:7b）或轻量模型（nomic-embed-text，768 维）

@@ -59,8 +59,8 @@ EVAL_EVERY     = 50         # TIGER default
 MAX_GRAD_NORM  = 1.0
 
 # ── Input / output ───────────────────────────────────────────────────────
-EMBEDDING_FILE = 'item_embeddings_raw_t5.npy'
-OUTPUT_TAG     = 't5_3kep'
+EMBEDDING_FILE = 'item_embeddings_raw_st5.npy'
+OUTPUT_TAG     = 'st5_3kep'
 
 
 # ─────────────────────────────────────────────────────────────────────────

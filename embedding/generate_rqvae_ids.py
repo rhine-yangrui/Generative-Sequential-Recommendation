@@ -1,8 +1,14 @@
 """
 RQ-VAE ID Generation: loads the best checkpoint and produces a semantic IDs npy.
 
-Loads:  checkpoints/rqvae_{TAG}_best_collision.pt   (TAG taken from rqvae.OUTPUT_TAG)
-Saves:  embedding/semantic_ids_rqvae_{TAG}.npy
+Loads:  checkpoints/rqvae_{TAG}_{VARIANT}.pt   (TAG from rqvae.OUTPUT_TAG)
+Saves:  embedding/semantic_ids_rqvae_{TAG}[_{VARIANT}].npy
+
+VARIANT defaults to `best_collision` (TIGER-aligned). Pass a different variant
+as the first CLI arg to use another checkpoint, e.g.:
+    python embedding/generate_rqvae_ids.py final
+    python embedding/generate_rqvae_ids.py best_loss
+Output filename gets `_{variant}` appended unless variant is `best_collision`.
 
 Each item gets a 4-tuple (c0, c1, c2, c3):
   - c0/c1/c2: learned RQ-VAE codes (ranges 256 / 256 / 256)
@@ -96,9 +102,10 @@ def generate_ids():
     data_tensor = torch.tensor(emb_matrix, dtype=torch.float32, device=device)
     n_items = len(data_tensor)
 
-    # Load best checkpoint (collision-rate based, matching TIGER's generate_code.py)
+    # Load checkpoint (variant defaults to best_collision, matching TIGER's generate_code.py)
+    variant = sys.argv[1] if len(sys.argv) > 1 else 'best_collision'
     ckpt_path = os.path.join(
-        proj_dir, 'checkpoints', f'rqvae_{OUTPUT_TAG}_best_collision.pt'
+        proj_dir, 'checkpoints', f'rqvae_{OUTPUT_TAG}_{variant}.pt'
     )
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     model = RQVAE(in_dim=ckpt.get('in_dim', in_dim)).to(device)
@@ -107,8 +114,7 @@ def generate_ids():
     print(
         f'加载 checkpoint: {ckpt_path}\n'
         f'  epoch={ckpt.get("epoch", "?")}  '
-        f'unique_rate={ckpt.get("unique_rate", float("nan")):.1%}  '
-        f'best_collision_rate={ckpt.get("best_collision_rate", float("nan")):.4f}'
+        f'variant={variant}'
     )
 
     # Extract 3-level codes
@@ -135,8 +141,11 @@ def generate_ids():
     print(f'解决后唯一 Semantic ID 数: {unique_count} / {len(all_sids)}')
     assert unique_count == len(all_sids), '仍有冲突，请检查 COLLISION_K'
 
-    # Save
-    output_path = os.path.join(emb_dir, f'semantic_ids_rqvae_{OUTPUT_TAG}.npy')
+    # Save (append variant suffix unless default best_collision)
+    out_suffix = '' if variant == 'best_collision' else f'_{variant}'
+    output_path = os.path.join(
+        emb_dir, f'semantic_ids_rqvae_{OUTPUT_TAG}{out_suffix}.npy'
+    )
     np.save(output_path, semantic_ids)
     print(f'已保存至 {output_path}')
 

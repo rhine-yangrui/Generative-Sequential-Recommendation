@@ -35,14 +35,15 @@ CONFIG = {
 }
 # ─────────────────────────────────────────────────────────────────────────
 
-ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae_t5_300ep.npy'
+ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae_st5_3kep.npy'
 
 # Checkpoint 名自动带上 sids 的 tag，避免多套 sids 互相覆盖。
-#   semantic_ids_rqvae.npy            → ''             → best_model_t5_200ep.pt
-#   semantic_ids_rqvae_3kep.npy       → '_3kep'        → best_model_t5_200ep_3kep.pt
-#   semantic_ids_rqvae_t5_300ep.npy   → '_t5_300ep'    → best_model_t5_200ep_t5_300ep.pt
-_sid_stem = os.path.splitext(ACTIVE_SEMANTIC_IDS)[0]          # semantic_ids_rqvae[_3kep]
-CKPT_TAG  = _sid_stem[len('semantic_ids_rqvae'):]             # '' | '_3kep' | '_t5_3kep'
+#   semantic_ids_rqvae_nomic_300ep.npy → '_nomic_300ep' → best_model_t5_200ep_nomic_300ep.pt
+#   semantic_ids_rqvae_nomic_3kep.npy  → '_nomic_3kep'  → best_model_t5_200ep_nomic_3kep.pt
+#   semantic_ids_rqvae_st5_300ep.npy   → '_st5_300ep'   → best_model_t5_200ep_st5_300ep.pt
+#   semantic_ids_rqvae_st5_3kep.npy    → '_st5_3kep'    → best_model_t5_200ep_st5_3kep.pt
+_sid_stem = os.path.splitext(ACTIVE_SEMANTIC_IDS)[0]          # semantic_ids_rqvae_{embed}_{epochs}
+CKPT_TAG  = _sid_stem[len('semantic_ids_rqvae'):]             # '_nomic_3kep' | '_st5_300ep' | ...
 
 TARGET_LEN = len(K_LEVELS)
 ENC_LEN    = CONFIG['maxlen'] * TARGET_LEN
