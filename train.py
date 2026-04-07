@@ -31,7 +31,7 @@ CONFIG = {
     'val_every':   2,       # 全量 val 较慢，每 2 epoch 评估一次
     'patience':    10,      # 对齐 TIGER
     'val_beam':    30,      # 对齐 TIGER 训练评估 beam_size
-    'val_batch':   64,      # batch 化 beam search，全量 val 也跑得动
+    'val_batch':   256,     # A100 40GB 够；OOM 就降到 128
 }
 # ─────────────────────────────────────────────────────────────────────────
 
