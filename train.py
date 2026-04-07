@@ -35,7 +35,7 @@ CONFIG = {
 }
 # ─────────────────────────────────────────────────────────────────────────
 
-ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae.npy'
+ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae_3kep.npy'
 TARGET_LEN = len(K_LEVELS)
 ENC_LEN    = CONFIG['maxlen'] * TARGET_LEN
 

@@ -55,9 +55,12 @@ EVAL_EVERY    = 50
 RESET_EVERY   = 100     # dead-code reset interval
 MAX_GRAD_NORM = 1.0
 
-# 输出文件 tag，避免与现有 rqvae_best.pt / semantic_ids_rqvae.npy 冲突
-# E9 train/evaluate 仍在用旧文件，新文件落到独立路径
-OUTPUT_TAG    = '3kep'
+# 输入 embedding 源与输出文件 tag
+# 切换 embedding：把这两个常量一起改
+#   nomic:  EMBEDDING_FILE = 'item_embeddings_raw_nomic.npy', OUTPUT_TAG = '3kep'
+#   t5:     EMBEDDING_FILE = 'item_embeddings_raw_t5.npy',    OUTPUT_TAG = 't5_3kep'
+EMBEDDING_FILE = 'item_embeddings_raw_nomic.npy'
+OUTPUT_TAG     = '3kep'
 
 
 # ---------------------------------------------------------------------------
@@ -357,9 +360,10 @@ def train_rqvae():
 
     emb_dir = os.path.dirname(os.path.abspath(__file__))
     raw = np.load(
-        os.path.join(emb_dir, 'item_embeddings_raw_nomic.npy'),
+        os.path.join(emb_dir, EMBEDDING_FILE),
         allow_pickle=True,
     ).item()
+    print(f'Embedding 源: {EMBEDDING_FILE}')
 
     item_ids   = sorted(raw.keys())
     emb_matrix = np.stack([raw[i] for i in item_ids]).astype(np.float32)

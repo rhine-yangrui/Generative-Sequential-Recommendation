@@ -21,7 +21,7 @@ import torch
 
 # Allow importing sibling module rqvae.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rqvae import RQVAE, K_LEVELS, BATCH_SIZE, select_device, OUTPUT_TAG
+from rqvae import RQVAE, K_LEVELS, BATCH_SIZE, select_device, OUTPUT_TAG, EMBEDDING_FILE
 
 # c3 collision-resolution capacity; must match model/tokenizer.py K_LEVELS[3]
 COLLISION_K = 64
@@ -75,9 +75,10 @@ def generate_ids():
 
     # Load embeddings
     raw = np.load(
-        os.path.join(emb_dir, 'item_embeddings_raw_nomic.npy'),
+        os.path.join(emb_dir, EMBEDDING_FILE),
         allow_pickle=True,
     ).item()
+    print(f'Embedding 源: {EMBEDDING_FILE}')
 
     item_ids   = sorted(raw.keys())
     emb_matrix = np.stack([raw[i] for i in item_ids]).astype(np.float32)

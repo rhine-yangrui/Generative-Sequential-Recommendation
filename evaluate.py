@@ -27,7 +27,7 @@ from model.inference import build_reverse_index, predict_topk_batch
 K_LIST     = [5, 10]    # 与 TIGER 论文一致：Recall@5, @10, NDCG@5, @10
 BEAM_WIDTH = 50         # beam search 宽度，越大越准但越慢
 BATCH_SIZE = 256        # 批量 beam search（A100 40GB 够；OOM 就降到 128）
-ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae.npy'
+ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae_3kep.npy'
 
 
 def compute_metrics(recommended_items, target, k_list):
