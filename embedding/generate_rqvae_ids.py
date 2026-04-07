@@ -1,8 +1,8 @@
 """
-RQ-VAE ID Generation: loads the best checkpoint and produces semantic_ids_rqvae.npy.
+RQ-VAE ID Generation: loads the best checkpoint and produces a semantic IDs npy.
 
-Loads:  checkpoints/rqvae_best.pt
-Saves:  embedding/semantic_ids_rqvae.npy
+Loads:  checkpoints/rqvae_{TAG}_best.pt   (TAG taken from rqvae.OUTPUT_TAG)
+Saves:  embedding/semantic_ids_rqvae_{TAG}.npy
 
 Each item gets a 4-tuple (c0, c1, c2, c3):
   - c0/c1/c2: learned RQ-VAE codes (ranges 256 / 256 / 256)
@@ -21,7 +21,7 @@ import torch
 
 # Allow importing sibling module rqvae.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rqvae import RQVAE, K_LEVELS, BATCH_SIZE, select_device
+from rqvae import RQVAE, K_LEVELS, BATCH_SIZE, select_device, OUTPUT_TAG
 
 # c3 collision-resolution capacity; must match model/tokenizer.py K_LEVELS[3]
 COLLISION_K = 64
@@ -88,13 +88,15 @@ def generate_ids():
     n_items = len(data_tensor)
 
     # Load best checkpoint
-    ckpt_path = os.path.join(proj_dir, 'checkpoints', 'rqvae_best.pt')
+    ckpt_path = os.path.join(proj_dir, 'checkpoints', f'rqvae_{OUTPUT_TAG}_best.pt')
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     model = RQVAE().to(device)
     model.load_state_dict(ckpt['model_state'])
     model.eval()
     print(
-        f'加载 checkpoint: epoch={ckpt["epoch"]}  '
+        f'加载 checkpoint: {ckpt_path}\n'
+        f'  epoch={ckpt["epoch"]}  '
+        f'recon_loss={ckpt.get("recon_loss", float("nan")):.4f}  '
         f'unique_rate={ckpt["unique_rate"]:.1%}'
     )
 
@@ -124,7 +126,7 @@ def generate_ids():
     assert unique_count == len(all_sids), '仍有冲突，请检查 COLLISION_K'
 
     # Save
-    output_path = os.path.join(emb_dir, 'semantic_ids_rqvae.npy')
+    output_path = os.path.join(emb_dir, f'semantic_ids_rqvae_{OUTPUT_TAG}.npy')
     np.save(output_path, semantic_ids)
     print(f'已保存至 {output_path}')
 

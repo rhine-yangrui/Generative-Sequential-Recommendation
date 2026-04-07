@@ -41,19 +41,23 @@ LATENT_DIM   = 32
 K_LEVELS     = [256, 256, 256]
 BETA         = 0.25
 
-# Sinkhorn balanced assignment: enabled for L1 and L2, disabled for L0.
+# Sinkhorn balanced assignment: only enabled on L2 (对齐 TIGER 默认配置)
 # Prevents codebook collapse by forcing roughly equal code usage per batch.
-SK_EPSILONS = [0.0, 0.003, 0.003]
+SK_EPSILONS = [0.0, 0.0, 0.003]
 SK_ITERS    = 50
 
 LR            = 1e-3
 WEIGHT_DECAY  = 1e-4
 BATCH_SIZE    = 1024
-WARMUP_EPOCHS = 50    # encoder-only warm-up before K-means init
-NUM_EPOCHS    = 300   # post-warmup full RQ-VAE training
-EVAL_EVERY    = 10
-RESET_EVERY   = 20    # dead-code reset interval
+WARMUP_EPOCHS = 50      # encoder-only warm-up before K-means init
+NUM_EPOCHS    = 3000    # post-warmup full RQ-VAE training（对齐 TIGER 3000）
+EVAL_EVERY    = 50
+RESET_EVERY   = 100     # dead-code reset interval
 MAX_GRAD_NORM = 1.0
+
+# 输出文件 tag，避免与现有 rqvae_best.pt / semantic_ids_rqvae.npy 冲突
+# E9 train/evaluate 仍在用旧文件，新文件落到独立路径
+OUTPUT_TAG    = '3kep'
 
 
 # ---------------------------------------------------------------------------
@@ -390,9 +394,10 @@ def train_rqvae():
 
     ckpt_dir  = os.path.join(os.path.dirname(emb_dir), 'checkpoints')
     os.makedirs(ckpt_dir, exist_ok=True)
-    ckpt_path = os.path.join(ckpt_dir, 'rqvae_best.pt')
+    ckpt_path  = os.path.join(ckpt_dir, f'rqvae_{OUTPUT_TAG}_best.pt')
+    final_path = os.path.join(ckpt_dir, f'rqvae_{OUTPUT_TAG}_final.pt')
 
-    best_unique_rate = 0.0
+    best_recon_loss = float('inf')
     print(f'开始 RQ-VAE 训练，共 {NUM_EPOCHS} epochs')
     print(f'Sinkhorn 配置: sk_epsilons={SK_EPSILONS}  (0.0 = 禁用)\n')
 
@@ -436,19 +441,33 @@ def train_rqvae():
                 f'usage: {usage_str}'
             )
 
-            if unique_rate > best_unique_rate:
-                best_unique_rate = unique_rate
+            # 与 unique 不同：3000 epoch 下 unique 早期就饱和（~99%），
+            # 后期靠 recon 持续改进编码器/码本质量。按 recon 选 best。
+            cur_recon = recon_sum / n_batches
+            if cur_recon < best_recon_loss:
+                best_recon_loss = cur_recon
                 torch.save({
                     'epoch':       epoch,
                     'model_state': model.state_dict(),
+                    'recon_loss':  cur_recon,
                     'unique_rate': unique_rate,
                     'usages':      usages,
                 }, ckpt_path)
-                print(f'  ✓ 保存最优 checkpoint (unique_rate={unique_rate:.1%})')
+                print(f'  ✓ 保存最优 checkpoint (recon={cur_recon:.4f}, unique={unique_rate:.1%})')
 
-    print(f'\n训练完成，最优 unique_rate={best_unique_rate:.1%}')
-    print(f'Checkpoint 保存至: {ckpt_path}')
-    print('运行 python embedding/generate_rqvae_ids.py 生成 semantic_ids_rqvae.npy')
+    # 始终额外保存最后一个 epoch，便于对比 best vs final
+    torch.save({
+        'epoch':       NUM_EPOCHS,
+        'model_state': model.state_dict(),
+        'recon_loss':  recon_sum / n_batches,
+        'unique_rate': unique_rate,
+        'usages':      usages,
+    }, final_path)
+
+    print(f'\n训练完成，最优 recon_loss={best_recon_loss:.4f}')
+    print(f'Best checkpoint:  {ckpt_path}')
+    print(f'Final checkpoint: {final_path}')
+    print(f'运行 python embedding/generate_rqvae_ids.py 生成 semantic_ids_rqvae_{OUTPUT_TAG}.npy')
 
 
 if __name__ == '__main__':
