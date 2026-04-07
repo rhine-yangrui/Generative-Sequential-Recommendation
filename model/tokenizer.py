@@ -38,21 +38,25 @@ def tokens_to_semantic_id(tokens):
     return tuple(token - LEVEL_OFFSETS[level] for level, token in enumerate(tokens))
 
 
-def seq_to_tokens(item_seq, semantic_ids, maxlen=20):
+def seq_to_t5_tokens(item_seq, semantic_ids, maxlen=20):
     """
-    把用户的 item ID 序列转成 token 序列（含 BOS，每个 item 后加 EOS 分隔符）。
+    T5 encoder 输入：拍平的 Semantic ID token 序列，左侧 PAD 到固定长度。
+
+    没有 BOS / EOS / 分隔符，对齐 TIGER 参考实现 (../TIGER/model/dataloader.py)。
 
     Args:
-        item_seq:     用户交互的 item ID 列表，如 [3, 17, 42, ...]
-        semantic_ids: dict，item_id -> (c1, c2, c3)
+        item_seq:     用户交互的 item ID 列表
+        semantic_ids: dict，item_id -> (c1, c2, c3, c4)
         maxlen:       最多保留最近多少个 item
 
     Returns:
-        token 列表，如 [BOS, c1, c2, c3, c4, EOS, ...]
+        长度恒为 `maxlen * len(K_LEVELS)` 的 token 列表，左 PAD
     """
-    tokens = [BOS_TOKEN]
+    tokens = []
     for item_id in item_seq[-maxlen:]:
         if item_id in semantic_ids:
             tokens.extend(item_to_tokens(semantic_ids[item_id]))
-            tokens.append(EOS_TOKEN)
+    target_len = maxlen * len(K_LEVELS)
+    if len(tokens) < target_len:
+        tokens = [PAD_TOKEN] * (target_len - len(tokens)) + tokens
     return tokens

@@ -1,45 +1,44 @@
 """
-生成式推荐模型：基于 GPT-2 架构，从头训练（不加载预训练权重）。
+生成式推荐模型：T5 encoder-decoder，从头训练（不加载预训练权重）。
 
-输入：用户历史行为的 Semantic ID token 序列
-      [BOS, c1¹, c2¹, c3¹, c4¹, EOS, c1², c2², c3², c4², EOS, ...]
-输出：下一个 item 的 Semantic ID token 序列
+对齐 TIGER (NeurIPS 2023) 参考实现 (../TIGER/model/main.py)。
+
+输入：encoder 收到拍平的历史 Semantic ID token 序列
+        [c1¹, c2¹, c3¹, c4¹, c1², c2², c3², c4², ..., PAD, PAD]
+输出：decoder 自回归生成下一个 item 的 4 个 Semantic ID token
 """
 
-from transformers import GPT2Config, GPT2LMHeadModel
-from model.tokenizer import VOCAB_SIZE, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN
+from transformers import T5Config, T5ForConditionalGeneration
+from model.tokenizer import VOCAB_SIZE, PAD_TOKEN, K_LEVELS
 
 
-def build_model(n_embd=256, n_layer=4, n_head=4):
+def build_model(d_model=128, d_ff=1024, num_layers=4,
+                num_heads=6, d_kv=64, dropout=0.1):
     """
-    构建轻量 GPT-2 推荐模型。
+    构建轻量 T5 推荐模型，对齐 TIGER 论文配置。
 
-    参数规模约 10M，适合 Colab T4 训练（~1-2 小时）。
-    如果 Colab 提供 A100，可以把 n_embd 调大到 512，n_layer 调到 6。
-
-    Args:
-        n_embd:  token embedding 维度（也是每层隐状态的维度）
-        n_layer: Transformer block 层数
-        n_head:  Multi-head attention 的头数，必须能整除 n_embd
+    默认参数与 TIGER 参考实现一致：
+      d_model=128, d_ff=1024, num_layers=4 (enc) + 4 (dec),
+      num_heads=6, d_kv=64, dropout=0.1, feed_forward_proj='relu'
 
     Returns:
-        GPT2LMHeadModel，未初始化权重（随机）
+        T5ForConditionalGeneration，未初始化权重（随机）
     """
-    config = GPT2Config(
+    config = T5Config(
         vocab_size=VOCAB_SIZE,
-        n_embd=n_embd,
-        n_layer=n_layer,
-        n_head=n_head,
-        n_positions=512,         # 1 BOS + 5*maxlen items (4 codes + EOS); maxlen=20 → ~106
-        bos_token_id=BOS_TOKEN,
-        eos_token_id=EOS_TOKEN,
+        d_model=d_model,
+        d_ff=d_ff,
+        num_layers=num_layers,
+        num_decoder_layers=num_layers,
+        num_heads=num_heads,
+        d_kv=d_kv,
+        dropout_rate=dropout,
+        feed_forward_proj='relu',
         pad_token_id=PAD_TOKEN,
-        resid_pdrop=0.1,
-        embd_pdrop=0.1,
-        attn_pdrop=0.1,
+        eos_token_id=PAD_TOKEN,            # 不使用 EOS，但 T5Config 必须给一个值
+        decoder_start_token_id=PAD_TOKEN,
     )
-    model = GPT2LMHeadModel(config)
-    return model
+    return T5ForConditionalGeneration(config)
 
 
 def count_parameters(model):
@@ -52,18 +51,18 @@ if __name__ == '__main__':
     model = build_model()
     print(f'模型参数量: {count_parameters(model) / 1e6:.1f}M')
     print(f'词表大小:   {model.config.vocab_size}')
-    print(f'最大序列长度: {model.config.n_positions}')
-    print()
 
-    # 构造一个假的 batch 验证 forward pass
+    # 构造假 batch 验证 forward pass
     batch_size = 4
-    seq_len = 26   # BOS + 5 items × 5 tokens(4 codes + EOS) = 26
-    input_ids = torch.randint(0, VOCAB_SIZE, (batch_size, seq_len))
-    input_ids[:, 0] = BOS_TOKEN  # 第一个 token 是 BOS
+    enc_len = 20 * len(K_LEVELS)   # maxlen=20 items × 4 tokens
+    dec_len = len(K_LEVELS)        # 目标 4 tokens
+    input_ids = torch.randint(0, VOCAB_SIZE, (batch_size, enc_len))
+    attention_mask = torch.ones_like(input_ids)
+    labels = torch.randint(0, VOCAB_SIZE, (batch_size, dec_len))
 
-    # labels 和 input_ids 相同，GPT-2 内部自动做 shift（预测下一个 token）
-    outputs = model(input_ids=input_ids, labels=input_ids)
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
     print(f'Forward pass 成功')
-    print(f'  输入 shape: {input_ids.shape}')
-    print(f'  Loss: {outputs.loss.item():.4f}  (随机初始化，期望 ≈ ln({VOCAB_SIZE}) = {__import__("math").log(VOCAB_SIZE):.2f})')
-    print(f'  Logits shape: {outputs.logits.shape}  (batch, seq_len, vocab_size)')
+    print(f'  encoder 输入 shape: {input_ids.shape}')
+    print(f'  decoder labels shape: {labels.shape}')
+    print(f'  Loss: {outputs.loss.item():.4f}')
+    print(f'  Logits shape: {outputs.logits.shape}')

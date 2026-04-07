@@ -1,10 +1,10 @@
 """
-训练脚本：在 Colab（T4/A100）上运行。
+训练脚本：T5 encoder-decoder 生成式推荐，对齐 TIGER 参考实现。
 
 用法：
     python train.py
 
-训练完成后模型保存至 checkpoints/best_model_rqvae_{num_epochs}ep.pt
+训练完成后模型保存至 checkpoints/best_model_t5_{num_epochs}ep.pt
 """
 
 import os
@@ -14,43 +14,39 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pad_sequence
 
 from model.tokenizer import (
-    seq_to_tokens, item_to_tokens, VOCAB_SIZE, PAD_TOKEN, K_LEVELS
+    seq_to_t5_tokens, item_to_tokens, VOCAB_SIZE, PAD_TOKEN, K_LEVELS
 )
 from model.generative_rec import build_model, count_parameters
 from model.inference import build_reverse_index, predict_topk
 
-# ── 超参数 ────────────────────────────────────────────────────────────────
+# ── 超参数（对齐 ../TIGER/model/main.py）─────────────────────────────────
 CONFIG = {
-    'maxlen':      20,      # 对齐 TIGER 参考实现
-    'batch_size':  256,     # 对齐 TIGER 参考实现
-    'lr':          1e-4,    # 对齐 TIGER 参考实现（旧 1e-3 太激进）
-    'num_epochs':  200,     # 对齐 TIGER 参考实现
-    'val_every':   10,      # 拉长以适应 200 epoch
-    'patience':    6,       # 连续 6 次 val Recall@10 不提升则停止
+    'maxlen':      20,
+    'batch_size':  256,
+    'lr':          1e-4,
+    'num_epochs':  200,
+    'val_every':   10,
+    'patience':    6,
 }
 # ─────────────────────────────────────────────────────────────────────────
 
 ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae.npy'
 TARGET_LEN = len(K_LEVELS)
+ENC_LEN    = CONFIG['maxlen'] * TARGET_LEN
 
 
 class RecDataset(Dataset):
     """
-    推荐数据集，支持滑动窗口数据增强。
+    T5 推荐数据集：history → encoder 输入，target item Semantic ID → decoder labels。
 
-    augment=True（训练集）：
-      序列 [a, b, c, d] 生成 3 条样本：
-        [a] → b,  [a,b] → c,  [a,b,c] → d
-      约 5-10 倍于原始样本量。
+    augment=True（训练）：滑动窗口，每个位置都生成一条样本。
+    augment=False（验证）：每用户只预测最后一个 item。
 
-    augment=False（验证集）：
-      每个用户只预测最后一个 item（与测试集评估方式一致）。
-
-    训练只对最后 TARGET_LEN 个 token（目标 item 的 Semantic ID，不含 EOS）计算 loss，
-    历史部分的 loss 用 -100 mask 掉。
+    每条样本固定形状：
+        history_tokens: ENC_LEN 个 token，左 PAD
+        target_tokens:  TARGET_LEN 个 token
     """
     def __init__(self, user_seqs, semantic_ids, maxlen=20, augment=True):
         self.samples = []
@@ -62,33 +58,25 @@ class RecDataset(Dataset):
                 continue
 
             if augment:
-                # 滑动窗口：每个位置都生成一条样本
                 for t in range(1, len(seq)):
                     target_item = seq[t]
                     if target_item not in semantic_ids:
                         continue
-                    history      = seq[:t]
-                    input_tokens = seq_to_tokens(history, semantic_ids, maxlen)
-                    target_tokens = item_to_tokens(semantic_ids[target_item])
-                    # full_tokens = [BOS, ..., semantic_id^T]
-                    # target 不追加 EOS，只监督 Semantic ID token。
-                    full_tokens  = input_tokens + target_tokens
-                    self.samples.append((full_tokens, len(input_tokens)))
+                    history       = seq[:t]
+                    history_tokens = seq_to_t5_tokens(history, semantic_ids, maxlen)
+                    target_tokens  = item_to_tokens(semantic_ids[target_item])
+                    self.samples.append((history_tokens, target_tokens))
             else:
-                # 只预测最后一个 item
                 target_item = seq[-1]
                 if target_item not in semantic_ids:
                     skipped += 1
                     continue
-                input_tokens  = seq_to_tokens(seq[:-1], semantic_ids, maxlen)
-                target_tokens = item_to_tokens(semantic_ids[target_item])
-                # full_tokens = [BOS, ..., semantic_id^T]
-                # target 不追加 EOS，只监督 Semantic ID token。
-                full_tokens   = input_tokens + target_tokens
-                self.samples.append((full_tokens, len(input_tokens)))
+                history_tokens = seq_to_t5_tokens(seq[:-1], semantic_ids, maxlen)
+                target_tokens  = item_to_tokens(semantic_ids[target_item])
+                self.samples.append((history_tokens, target_tokens))
 
         if skipped:
-            print(f'  跳过 {skipped} 个样本（序列过短或缺少 semantic_id）')
+            print(f'  跳过 {skipped} 个样本')
 
     def __len__(self):
         return len(self.samples)
@@ -99,41 +87,31 @@ class RecDataset(Dataset):
 
 def collate_fn(batch):
     """
-    将一个 batch 的样本 padding 到相同长度。
-
-    input_ids:  (B, max_len)，PAD_TOKEN 填充
-    labels:     (B, max_len)，历史部分 mask 为 -100，只有目标 Semantic ID token 计算 loss
+    输出：
+      input_ids:      (B, ENC_LEN)
+      attention_mask: (B, ENC_LEN)，PAD 位置为 0
+      labels:         (B, TARGET_LEN)，T5 内部自动 shift right
     """
-    token_seqs   = [torch.tensor(tokens, dtype=torch.long) for tokens, _ in batch]
-    history_lens = [hist_len for _, hist_len in batch]
-
-    input_ids = pad_sequence(token_seqs, batch_first=True, padding_value=PAD_TOKEN)
-
-    labels = torch.full_like(input_ids, -100)
-    for i, (tokens, hist_len) in enumerate(zip(token_seqs, history_lens)):
-        target_start = hist_len
-        target_end   = hist_len + TARGET_LEN
-        labels[i, target_start:target_end] = tokens[target_start:target_end]
-
-    return input_ids, labels
+    input_ids = torch.tensor([h for h, _ in batch], dtype=torch.long)
+    labels    = torch.tensor([t for _, t in batch], dtype=torch.long)
+    attention_mask = (input_ids != PAD_TOKEN).long()
+    return input_ids, attention_mask, labels
 
 
 def evaluate_recall_subset(model, val_seqs, semantic_ids, device,
                            k=10, n_users=500, beam_width=20):
-    """
-    在 val 集随机子集上计算 Recall@10，用于 early stopping。
-    """
+    """val 子集 Recall@k，用于 early stopping。"""
     sid_to_item, sid_array, item_id_list = build_reverse_index(semantic_ids)
     model.eval()
-    users = list(val_seqs.keys())
+    users   = list(val_seqs.keys())
     sampled = _random.sample(users, min(n_users, len(users)))
-    hits = 0
+    hits    = 0
 
     with torch.no_grad():
         for user in sampled:
             full_seq = val_seqs[user]
-            target = full_seq[-1]
-            history = full_seq[:-1]
+            target   = full_seq[-1]
+            history  = full_seq[:-1]
 
             recs = predict_topk(
                 model, history, semantic_ids, sid_to_item, sid_array,
@@ -147,7 +125,6 @@ def evaluate_recall_subset(model, val_seqs, semantic_ids, device,
 
 
 def train():
-    # ── 设备 ──────────────────────────────────────────────────────────────
     if torch.cuda.is_available():
         device = torch.device('cuda')
     elif torch.backends.mps.is_available():
@@ -156,10 +133,8 @@ def train():
         device = torch.device('cpu')
     print(f'使用设备: {device}')
 
-    # ── 加载数据 ──────────────────────────────────────────────────────────
     base_dir     = os.path.dirname(os.path.abspath(__file__))
     data         = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
-    # Active Semantic ID file: RQ-VAE on top of nomic embeddings.
     semantic_ids = np.load(os.path.join(base_dir, 'embedding', ACTIVE_SEMANTIC_IDS),
                            allow_pickle=True).item()
 
@@ -167,7 +142,6 @@ def train():
     val_seqs   = data['val']
     print(f'训练用户数: {len(train_seqs)},  验证用户数: {len(val_seqs)}')
 
-    # ── 构建 Dataset ──────────────────────────────────────────────────────
     print('构建训练集（滑动窗口增强）...')
     train_dataset = RecDataset(train_seqs, semantic_ids, CONFIG['maxlen'], augment=True)
     print(f'  训练样本数: {len(train_dataset)}')
@@ -177,8 +151,8 @@ def train():
     print(f'  验证样本数: {len(val_dataset)}')
 
     train_loader = DataLoader(train_dataset, batch_size=CONFIG['batch_size'],
-                              shuffle=True,  collate_fn=collate_fn, num_workers=2)
-    # ── 模型 ──────────────────────────────────────────────────────────────
+                              shuffle=True, collate_fn=collate_fn, num_workers=2)
+
     model = build_model().to(device)
     print(f'\n模型参数量: {count_parameters(model) / 1e6:.1f}M')
     print(f'词表大小: {VOCAB_SIZE}')
@@ -187,23 +161,25 @@ def train():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=CONFIG['num_epochs'], eta_min=1e-5)
 
-    # ── 训练循环 ──────────────────────────────────────────────────────────
     os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
-    ckpt_path = os.path.join(base_dir, f'checkpoints/best_model_rqvae_{CONFIG["num_epochs"]}ep.pt')
+    ckpt_path = os.path.join(base_dir, f'checkpoints/best_model_t5_{CONFIG["num_epochs"]}ep.pt')
     best_val_recall = 0.0
-    patience_count = 0
+    patience_count  = 0
 
     print(f'\n开始训练，共 {CONFIG["num_epochs"]} epochs\n')
     for epoch in range(1, CONFIG['num_epochs'] + 1):
         model.train()
         total_loss = 0.0
 
-        for input_ids, labels in train_loader:
-            input_ids = input_ids.to(device)
-            labels    = labels.to(device)
+        for input_ids, attention_mask, labels in train_loader:
+            input_ids      = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+            labels         = labels.to(device)
 
-            outputs = model(input_ids=input_ids, labels=labels)
-            loss    = outputs.loss
+            outputs = model(input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=labels)
+            loss = outputs.loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -225,13 +201,13 @@ def train():
 
             if val_recall > best_val_recall:
                 best_val_recall = val_recall
-                patience_count = 0
+                patience_count  = 0
                 torch.save(model.state_dict(), ckpt_path)
                 print(f'  ✓ 保存最优模型 (val_Recall@10={best_val_recall:.4f})')
             else:
                 patience_count += 1
                 if patience_count >= CONFIG['patience']:
-                    print(f'\nEarly stopping（连续 {CONFIG["patience"]} 次 val Recall@10 未提升）')
+                    print(f'\nEarly stopping（连续 {CONFIG["patience"]} 次未提升）')
                     break
         else:
             print(f'Epoch {epoch:3d}/{CONFIG["num_epochs"]}  train_loss={avg_train_loss:.4f}')
