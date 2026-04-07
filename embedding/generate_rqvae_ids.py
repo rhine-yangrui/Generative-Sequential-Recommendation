@@ -1,7 +1,7 @@
 """
 RQ-VAE ID Generation: loads the best checkpoint and produces a semantic IDs npy.
 
-Loads:  checkpoints/rqvae_{TAG}_best.pt   (TAG taken from rqvae.OUTPUT_TAG)
+Loads:  checkpoints/rqvae_{TAG}_best_collision.pt   (TAG taken from rqvae.OUTPUT_TAG)
 Saves:  embedding/semantic_ids_rqvae_{TAG}.npy
 
 Each item gets a 4-tuple (c0, c1, c2, c3):
@@ -14,14 +14,21 @@ Usage:
 
 import os
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 import numpy as np
 import torch
 
 # Allow importing sibling module rqvae.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rqvae import RQVAE, K_LEVELS, BATCH_SIZE, select_device, OUTPUT_TAG, EMBEDDING_FILE
+from rqvae import (
+    RQVAE,
+    K_LEVELS,
+    BATCH_SIZE,
+    EMBEDDING_FILE,
+    OUTPUT_TAG,
+    select_device,
+)
 
 # c3 collision-resolution capacity; must match model/tokenizer.py K_LEVELS[3]
 COLLISION_K = 64
@@ -82,38 +89,40 @@ def generate_ids():
 
     item_ids   = sorted(raw.keys())
     emb_matrix = np.stack([raw[i] for i in item_ids]).astype(np.float32)
-    emb_matrix /= np.clip(np.linalg.norm(emb_matrix, axis=1, keepdims=True), 1e-12, None)
+    # 不做 L2 normalize：与 rqvae.py 训练时保持一致
     print(f'加载 embedding: {emb_matrix.shape}')
 
+    in_dim = emb_matrix.shape[1]
     data_tensor = torch.tensor(emb_matrix, dtype=torch.float32, device=device)
     n_items = len(data_tensor)
 
-    # Load best checkpoint
-    ckpt_path = os.path.join(proj_dir, 'checkpoints', f'rqvae_{OUTPUT_TAG}_best.pt')
+    # Load best checkpoint (collision-rate based, matching TIGER's generate_code.py)
+    ckpt_path = os.path.join(
+        proj_dir, 'checkpoints', f'rqvae_{OUTPUT_TAG}_best_collision.pt'
+    )
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
-    model = RQVAE().to(device)
-    model.load_state_dict(ckpt['model_state'])
+    model = RQVAE(in_dim=ckpt.get('in_dim', in_dim)).to(device)
+    model.load_state_dict(ckpt['state_dict'])
     model.eval()
     print(
         f'加载 checkpoint: {ckpt_path}\n'
-        f'  epoch={ckpt["epoch"]}  '
-        f'recon_loss={ckpt.get("recon_loss", float("nan")):.4f}  '
-        f'unique_rate={ckpt["unique_rate"]:.1%}'
+        f'  epoch={ckpt.get("epoch", "?")}  '
+        f'unique_rate={ckpt.get("unique_rate", float("nan")):.1%}  '
+        f'best_collision_rate={ckpt.get("best_collision_rate", float("nan")):.4f}'
     )
 
     # Extract 3-level codes
     print('提取 Semantic IDs...')
-    all_codes_per_level = [[] for _ in range(len(K_LEVELS))]
+    chunks = []
     with torch.no_grad():
         for i in range(0, n_items, BATCH_SIZE):
             batch = data_tensor[i:i + BATCH_SIZE]
-            z = model.encoder(batch)
-            codes, _, _ = model.quantizer(z)
-            for level, code_tensor in enumerate(codes):
-                all_codes_per_level[level].extend(code_tensor.cpu().tolist())
+            indices = model.get_indices(batch, use_sk=False)  # (B, n_levels)
+            chunks.append(indices.cpu())
+    all_codes = torch.cat(chunks, dim=0).numpy()  # (N, n_levels)
 
     semantic_ids_raw = {
-        item_id: tuple(all_codes_per_level[lvl][idx] for lvl in range(len(K_LEVELS)))
+        item_id: tuple(int(c) for c in all_codes[idx])
         for idx, item_id in enumerate(item_ids)
     }
 
@@ -134,12 +143,9 @@ def generate_ids():
     # Sanity checks
     print('\n--- Sanity Check ---')
     print(f'总 item 数: {len(semantic_ids)}')
-    c0_used = len(set(v[0] for v in semantic_ids.values()))
-    print(f'c0 使用码数: {c0_used} / {K_LEVELS[0]}')
-    c1_used = len(set(v[1] for v in semantic_ids.values()))
-    print(f'c1 使用码数: {c1_used} / {K_LEVELS[1]}')
-    c2_used = len(set(v[2] for v in semantic_ids.values()))
-    print(f'c2 使用码数: {c2_used} / {K_LEVELS[2]}')
+    for lvl in range(len(K_LEVELS)):
+        used = len({v[lvl] for v in semantic_ids.values()})
+        print(f'c{lvl} 使用码数: {used} / {K_LEVELS[lvl]}')
     c3_max = max(v[3] for v in semantic_ids.values())
     print(f'c3 最大值: {c3_max}  (容量: {COLLISION_K})')
 

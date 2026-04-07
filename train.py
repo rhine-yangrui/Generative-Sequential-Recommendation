@@ -35,12 +35,12 @@ CONFIG = {
 }
 # ─────────────────────────────────────────────────────────────────────────
 
-ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae_3kep.npy'
+ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae_t5_300ep.npy'
 
 # Checkpoint 名自动带上 sids 的 tag，避免多套 sids 互相覆盖。
-#   semantic_ids_rqvae.npy       → ''              → best_model_t5_200ep.pt
-#   semantic_ids_rqvae_3kep.npy  → '_3kep'         → best_model_t5_200ep_3kep.pt
-#   semantic_ids_rqvae_t5_3kep.npy → '_t5_3kep'    → best_model_t5_200ep_t5_3kep.pt
+#   semantic_ids_rqvae.npy            → ''             → best_model_t5_200ep.pt
+#   semantic_ids_rqvae_3kep.npy       → '_3kep'        → best_model_t5_200ep_3kep.pt
+#   semantic_ids_rqvae_t5_300ep.npy   → '_t5_300ep'    → best_model_t5_200ep_t5_300ep.pt
 _sid_stem = os.path.splitext(ACTIVE_SEMANTIC_IDS)[0]          # semantic_ids_rqvae[_3kep]
 CKPT_TAG  = _sid_stem[len('semantic_ids_rqvae'):]             # '' | '_3kep' | '_t5_3kep'
 

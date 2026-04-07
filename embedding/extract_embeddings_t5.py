@@ -27,20 +27,21 @@ OUTPUT_NAME  = 'item_embeddings_raw_t5.npy'
 
 def build_item_prompt(meta):
     """
-    与 extract_embeddings.py 保持同样的文本模板，确保 nomic / t5 的对比
-    只差在 embedding 模型本身。
+    对齐 TIGER 参考实现 (../TIGER/data/process.ipynb)：
+    使用 title / price / salesRank / brand / categories 五个字段，
+    dict-like 格式，无 instruction 后缀（Sentence-T5 非 instruction-tuned）。
     """
-    title = meta.get('title', '')
     description = meta.get('description', '')
     if isinstance(description, list):
         description = ' '.join(description)
-    categories = meta.get('categories', [[]])
-    categories = ' > '.join(categories[0]) if categories else ''
+    description = description[:300]
     return (
-        f'Product: {title}\n'
-        f'Category: {categories}\n'
-        f'Description: {description[:300]}\n\n'
-        f'Represent this product for semantic retrieval.'
+        f"'title':{meta.get('title', '')}\n"
+        f" 'price':{meta.get('price', '')}\n"
+        f" 'salesRank':{meta.get('salesRank', '')}\n"
+        f" 'brand':{meta.get('brand', '')}\n"
+        f" 'categories':{meta.get('categories', '')}\n"
+        f" 'description':{description}"
     )
 
 
