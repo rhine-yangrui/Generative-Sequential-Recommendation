@@ -25,13 +25,13 @@ from model.inference import build_reverse_index, predict_topk, predict_topk_batc
 # ── 超参数（对齐 ../TIGER/model/main.py）─────────────────────────────────
 CONFIG = {
     'maxlen':      20,
-    'batch_size':  256,
-    'lr':          1e-4,
+    'batch_size':  512,     # E10 实测 batch 256 只吃到 16/40 GB A100；翻倍到 512 安全
+    'lr':          1e-4,    # 保持 TIGER 原值，不跟着 batch 缩放，维持与 E9/E10 对照
     'num_epochs':  200,     # 对齐 TIGER；E8 (100ep+cosine) 证明在低 LR 下被截停
     'val_every':   2,       # 全量 val 较慢，每 2 epoch 评估一次
     'patience':    10,      # 对齐 TIGER
     'val_beam':    30,      # 对齐 TIGER 训练评估 beam_size
-    'val_batch':   256,     # A100 40GB 够；OOM 就降到 128
+    'val_batch':   256,     # beam search 比训练吃显存，不跟 train batch 一起涨
 }
 # ─────────────────────────────────────────────────────────────────────────
 
