@@ -4,7 +4,7 @@ RQ-VAE Training: trains encoder/decoder/quantizer on nomic embeddings.
 Architecture:
   - Encoder: 768 -> 512 -> 256 -> 128 -> 32
   - Decoder: 32 -> 128 -> 256 -> 512 -> 768
-  - 3 codebooks: K_LEVELS=[4, 16, 256], code dim=32
+  - 3 codebooks: K_LEVELS=[256, 256, 256], code dim=32
   - Loss: reconstruction loss + commitment loss (beta=0.25)
 
 Training recipe:
@@ -38,7 +38,7 @@ from sklearn.cluster import KMeans
 INPUT_DIM    = 768
 HIDDEN_DIMS  = [512, 256, 128]
 LATENT_DIM   = 32
-K_LEVELS     = [4, 16, 256]
+K_LEVELS     = [256, 256, 256]
 BETA         = 0.25
 
 # Sinkhorn balanced assignment: enabled for L1 and L2, disabled for L0.

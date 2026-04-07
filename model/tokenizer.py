@@ -1,7 +1,7 @@
 """
 Token 词表设计：
-- RQ-VAE 学到的三级 Semantic ID: 4 / 16 / 256
-- 若前三码发生 collision，则追加第 4 个去冲突 token（0~255）
+- RQ-VAE 学到的三级 Semantic ID: 256 / 256 / 256
+- 若前三码发生 collision，则追加第 4 个去冲突 token（0~63）
 
 最终用于生成式模型的 Semantic ID 长度为 4：
   (c1, c2, c3, c4)
@@ -9,10 +9,10 @@ Token 词表设计：
 其中：
 - c1, c2, c3 由 RQ-VAE 学习得到
 - c4 仅用于 collision resolution；无冲突时统一为 0
-- c4 容量设为 512，以覆盖当前数据上的最大 collision group
+- c4 容量设为 64，与 embedding/generate_rqvae_ids.py 的 COLLISION_K 对齐
 """
 
-K_LEVELS = [4, 16, 256, 512]
+K_LEVELS = [256, 256, 256, 64]
 
 LEVEL_OFFSETS = []
 _offset = 0

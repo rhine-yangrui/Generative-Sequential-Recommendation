@@ -5,7 +5,7 @@ Loads:  checkpoints/rqvae_best.pt
 Saves:  embedding/semantic_ids_rqvae.npy
 
 Each item gets a 4-tuple (c0, c1, c2, c3):
-  - c0/c1/c2: learned RQ-VAE codes (ranges 4 / 16 / 256)
+  - c0/c1/c2: learned RQ-VAE codes (ranges 256 / 256 / 256)
   - c3: collision-resolution index (0 when no collision, 0..N-1 within a group)
 
 Usage:
@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rqvae import RQVAE, K_LEVELS, BATCH_SIZE, select_device
 
 # c3 collision-resolution capacity; must match model/tokenizer.py K_LEVELS[3]
-COLLISION_K = 512
+COLLISION_K = 64
 
 
 def resolve_collisions(semantic_ids_raw):
@@ -131,8 +131,8 @@ def generate_ids():
     # Sanity checks
     print('\n--- Sanity Check ---')
     print(f'总 item 数: {len(semantic_ids)}')
-    c0_dist = Counter(v[0] for v in semantic_ids.values())
-    print(f'c0 分布 (4 categories): {sorted(c0_dist.items())}')
+    c0_used = len(set(v[0] for v in semantic_ids.values()))
+    print(f'c0 使用码数: {c0_used} / {K_LEVELS[0]}')
     c1_used = len(set(v[1] for v in semantic_ids.values()))
     print(f'c1 使用码数: {c1_used} / {K_LEVELS[1]}')
     c2_used = len(set(v[2] for v in semantic_ids.values()))
