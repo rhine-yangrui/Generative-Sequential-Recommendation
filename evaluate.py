@@ -119,13 +119,14 @@ if __name__ == '__main__':
     semantic_ids = np.load(os.path.join(base_dir, 'embedding', ACTIVE_SEMANTIC_IDS),
                            allow_pickle=True).item()
 
-    # 加载模型
+    # 加载模型（可通过命令行参数指定 checkpoint：python evaluate.py checkpoints/xxx.pt）
+    import sys
+    ckpt_rel = sys.argv[1] if len(sys.argv) > 1 else 'checkpoints/best_model_rqvae_60ep.pt'
+    ckpt_path = os.path.join(base_dir, ckpt_rel)
     model = build_model().to(device)
-    model.load_state_dict(torch.load(
-        os.path.join(base_dir, 'checkpoints/best_model.pt'),
-        map_location=device, weights_only=True))
+    model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
     model.eval()
-    print('模型加载成功')
+    print(f'模型加载成功: {ckpt_rel}')
 
     # 构建反向索引
     sid_to_item, sid_array, item_id_list = build_reverse_index(semantic_ids)

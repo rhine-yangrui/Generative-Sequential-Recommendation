@@ -4,7 +4,7 @@
 用法：
     python train.py
 
-训练完成后模型保存至 checkpoints/best_model.pt
+训练完成后模型保存至 checkpoints/best_model_rqvae_{num_epochs}ep.pt
 """
 
 import os
@@ -189,6 +189,7 @@ def train():
 
     # ── 训练循环 ──────────────────────────────────────────────────────────
     os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
+    ckpt_path = os.path.join(base_dir, f'checkpoints/best_model_rqvae_{CONFIG["num_epochs"]}ep.pt')
     best_val_recall = 0.0
     patience_count = 0
 
@@ -225,8 +226,7 @@ def train():
             if val_recall > best_val_recall:
                 best_val_recall = val_recall
                 patience_count = 0
-                torch.save(model.state_dict(),
-                           os.path.join(base_dir, 'checkpoints/best_model.pt'))
+                torch.save(model.state_dict(), ckpt_path)
                 print(f'  ✓ 保存最优模型 (val_Recall@10={best_val_recall:.4f})')
             else:
                 patience_count += 1
@@ -237,7 +237,7 @@ def train():
             print(f'Epoch {epoch:3d}/{CONFIG["num_epochs"]}  train_loss={avg_train_loss:.4f}')
 
     print(f'\n训练完成，最优 val_Recall@10={best_val_recall:.4f}')
-    print(f'模型已保存至 checkpoints/best_model.pt')
+    print(f'模型已保存至 {ckpt_path}')
 
 
 if __name__ == '__main__':
