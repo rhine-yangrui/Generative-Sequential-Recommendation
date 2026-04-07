@@ -31,6 +31,7 @@ CONFIG = {
     'val_every':   2,       # 全量 val 较慢，每 2 epoch 评估一次
     'patience':    10,      # 对齐 TIGER
     'val_beam':    30,      # 对齐 TIGER 训练评估 beam_size
+    'val_subset':  5000,    # 固定 val 子集（非每次重抽），SE ≈ 0.004 已足够稳
 }
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -100,35 +101,48 @@ def collate_fn(batch):
     return input_ids, attention_mask, labels
 
 
+_VAL_USER_CACHE = None
+
+
+def _get_fixed_val_users(val_seqs, n_users):
+    """固定 val 子集（按 user_id 排序后取前 n_users 个），跨 epoch 完全一致。"""
+    global _VAL_USER_CACHE
+    if _VAL_USER_CACHE is None:
+        users = sorted(val_seqs.keys())
+        _VAL_USER_CACHE = users[:n_users] if n_users else users
+    return _VAL_USER_CACHE
+
+
 def evaluate_full_val(model, val_seqs, semantic_ids, device,
-                      k=10, beam_width=30):
+                      k=10, beam_width=30, n_users=None):
     """
-    全量 val 评估，对齐 TIGER：固定顺序、所有用户、与 test 一致的 beam。
+    val 评估。固定子集（无随机重抽样），对齐 test 的 beam。
     返回 (Recall@k, NDCG@k)。
     """
     sid_to_item, sid_array, item_id_list = build_reverse_index(semantic_ids)
     model.eval()
 
+    sampled = _get_fixed_val_users(val_seqs, n_users)
     recalls = 0
     ndcgs   = 0.0
-    n       = 0
 
     with torch.no_grad():
-        for user, full_seq in val_seqs.items():
-            target  = full_seq[-1]
-            history = full_seq[:-1]
+        for user in sampled:
+            full_seq = val_seqs[user]
+            target   = full_seq[-1]
+            history  = full_seq[:-1]
 
             recs = predict_topk(
                 model, history, semantic_ids, sid_to_item, sid_array,
                 item_id_list, k=k, beam_width=beam_width, device=device
             )
-            n += 1
             if target in recs:
                 rank = recs.index(target) + 1
                 recalls += 1
                 ndcgs   += 1.0 / math.log2(rank + 1)
 
     model.train()
+    n = len(sampled)
     return (recalls / n, ndcgs / n) if n else (0.0, 0.0)
 
 
@@ -203,7 +217,8 @@ def train():
         if epoch % CONFIG['val_every'] == 0 or epoch == 1:
             val_recall, val_ndcg = evaluate_full_val(
                 model, val_seqs, semantic_ids, device,
-                k=10, beam_width=CONFIG['val_beam']
+                k=10, beam_width=CONFIG['val_beam'],
+                n_users=CONFIG['val_subset'],
             )
             print(f'Epoch {epoch:3d}/{CONFIG["num_epochs"]}  '
                   f'train_loss={avg_train_loss:.4f}  '
