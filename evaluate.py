@@ -12,12 +12,14 @@
 
 用法：
     python evaluate.py
+    python evaluate.py --semantic-ids semantic_ids_random.npy \
+                       --ckpt checkpoints/best_model_t5_random.pt
 """
 
+import argparse
 import math
 import os
 import pickle
-import sys
 
 import numpy as np
 import torch
@@ -29,8 +31,8 @@ from model.inference import build_reverse_index, predict_topk_batch
 K_LIST     = [5, 10]    # 与 TIGER 论文一致：Recall@5, @10, NDCG@5, @10
 BEAM_WIDTH = 50         # beam search 宽度，越大越准但越慢
 BATCH_SIZE = 256        # 批量 beam search（A100 40GB 够；OOM 就降到 128）
-SEMANTIC_IDS_FILE = 'semantic_ids_rqvae.npy'
-DEFAULT_CKPT      = 'checkpoints/best_model_t5.pt'
+DEFAULT_SEMANTIC_IDS_FILE = 'semantic_ids_rqvae.npy'
+DEFAULT_CKPT              = 'checkpoints/best_model_t5.pt'
 
 
 def compute_metrics(recommended_items, target, k_list):
@@ -121,6 +123,13 @@ def print_results(summary, model_name='Our Model'):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--semantic-ids', default=DEFAULT_SEMANTIC_IDS_FILE,
+                        help='semantic IDs 文件名（相对 embedding/）')
+    parser.add_argument('--ckpt', default=DEFAULT_CKPT,
+                        help='checkpoint 路径（相对项目根）')
+    args = parser.parse_args()
+
     np.random.seed(42)
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -134,16 +143,16 @@ if __name__ == '__main__':
 
     # 加载数据
     data         = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
-    semantic_ids = np.load(os.path.join(base_dir, 'embedding', SEMANTIC_IDS_FILE),
+    semantic_ids = np.load(os.path.join(base_dir, 'embedding', args.semantic_ids),
                            allow_pickle=True).item()
+    print(f'Semantic IDs: {args.semantic_ids}')
 
-    # 加载模型（可通过命令行参数指定 checkpoint：python evaluate.py checkpoints/xxx.pt）
-    ckpt_rel = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CKPT
-    ckpt_path = os.path.join(base_dir, ckpt_rel)
+    # 加载模型
+    ckpt_path = os.path.join(base_dir, args.ckpt)
     model = build_model().to(device)
     model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
     model.eval()
-    print(f'模型加载成功: {ckpt_rel}')
+    print(f'模型加载成功: {args.ckpt}')
 
     # 构建反向索引
     sid_to_item, sid_array, item_id_list = build_reverse_index(semantic_ids)

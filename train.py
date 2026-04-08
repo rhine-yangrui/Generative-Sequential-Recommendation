@@ -3,10 +3,13 @@
 
 用法：
     python train.py
+    python train.py --semantic-ids semantic_ids_random.npy \
+                    --ckpt checkpoints/best_model_t5_random.pt
 
-训练完成后模型保存至 checkpoints/best_model_t5.pt
+训练完成后模型保存至 --ckpt 指定路径（默认 checkpoints/best_model_t5.pt）。
 """
 
+import argparse
 import math
 import os
 import pickle
@@ -36,8 +39,8 @@ CONFIG = {
 }
 # ─────────────────────────────────────────────────────────────────────────
 
-SEMANTIC_IDS_FILE = 'semantic_ids_rqvae.npy'
-CKPT_FILE         = 'checkpoints/best_model_t5.pt'
+DEFAULT_SEMANTIC_IDS_FILE = 'semantic_ids_rqvae.npy'
+DEFAULT_CKPT_FILE         = 'checkpoints/best_model_t5.pt'
 
 TARGET_LEN = len(K_LEVELS)
 ENC_LEN    = CONFIG['maxlen'] * TARGET_LEN
@@ -152,7 +155,8 @@ def evaluate_full_val(model, val_seqs, semantic_ids, device,
     return (recalls / n, ndcgs / n) if n else (0.0, 0.0)
 
 
-def train():
+def train(semantic_ids_file=DEFAULT_SEMANTIC_IDS_FILE,
+          ckpt_file=DEFAULT_CKPT_FILE):
     if torch.cuda.is_available():
         device = torch.device('cuda')
     elif torch.backends.mps.is_available():
@@ -160,10 +164,12 @@ def train():
     else:
         device = torch.device('cpu')
     print(f'使用设备: {device}')
+    print(f'Semantic IDs: {semantic_ids_file}')
+    print(f'Checkpoint:   {ckpt_file}')
 
     base_dir     = os.path.dirname(os.path.abspath(__file__))
     data         = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
-    semantic_ids = np.load(os.path.join(base_dir, 'embedding', SEMANTIC_IDS_FILE),
+    semantic_ids = np.load(os.path.join(base_dir, 'embedding', semantic_ids_file),
                            allow_pickle=True).item()
 
     train_seqs = data['train']
@@ -189,7 +195,7 @@ def train():
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
 
     os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
-    ckpt_path = os.path.join(base_dir, CKPT_FILE)
+    ckpt_path = os.path.join(base_dir, ckpt_file)
     best_val_ndcg  = 0.0
     patience_count = 0
 
@@ -245,7 +251,14 @@ def train():
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--semantic-ids', default=DEFAULT_SEMANTIC_IDS_FILE,
+                        help='semantic IDs 文件名（相对 embedding/）')
+    parser.add_argument('--ckpt', default=DEFAULT_CKPT_FILE,
+                        help='checkpoint 保存路径（相对项目根）')
+    args = parser.parse_args()
+
     random.seed(42)
     np.random.seed(42)
     torch.manual_seed(42)
-    train()
+    train(semantic_ids_file=args.semantic_ids, ckpt_file=args.ckpt)
