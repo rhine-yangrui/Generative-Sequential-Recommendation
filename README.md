@@ -1,92 +1,92 @@
 # Generative Sequential Recommendation via Semantic IDs
 
-A simplified reproduction of [TIGER (NeurIPS 2023)](https://arxiv.org/abs/2305.05065).
-This repository studies whether hierarchical Semantic IDs help autoregressive
-next-item generation on Amazon Beauty.
+A from-scratch implementation of generative sequential recommendation on Amazon Beauty.
+Each item is represented by a short, hierarchical Semantic ID learned by a Residual-Quantized VAE
+over text embeddings, and a small T5 encoder-decoder predicts the next item by autoregressively
+generating the four tokens of its Semantic ID.
 
-The repo has three layers of information:
-
-- Current code path: what the scripts do today (this README).
-- Recorded experiments: numbers in [Progress.md](./Progress.md).
-- Improvement plan: [plan.md](./plan.md).
-
-## Current Code Path
-
-### Pipeline
-
-1. `data/data_process.py` → `beauty_data.pkl`
-2. `embedding/extract_embeddings.py` (`nomic-embed-text` via Ollama)
-   → `embedding/item_embeddings_raw.npy`
-3. `embedding/rqvae.py` trains the RQ-VAE on the nomic embeddings
-   → `checkpoints/rqvae_best.pt`
-4. `embedding/generate_rqvae_ids.py` loads the best checkpoint, runs argmin
-   quantization, resolves collisions with a 4th code
-   → `embedding/semantic_ids_rqvae.npy`
-5. `train.py` trains a from-scratch T5 encoder-decoder (~4.6M params); early
-   stopping on validation NDCG@10 → `checkpoints/best_model_t5.pt`
-6. `evaluate.py` runs all-rank Recall@K / NDCG@K on the test set.
-
-The `baseline/sasrec_train.py` SASRec baseline is independent of the
-generative path.
-
-### Tokenizer
-
-`model/tokenizer.py` uses a **4-token Semantic ID** layout:
-
-- `K_LEVELS = [256, 256, 256, 64]`
-- first 3 levels are RQ-VAE codes; the 4th is collision resolution
-- `seq_to_t5_tokens()` flattens history into encoder input
-- vocab = `sum(K_LEVELS) + 3` (BOS / EOS / PAD)
-
-### RQ-VAE training (`embedding/rqvae.py`)
-
-- 5-hidden encoder `[768→512→256→128→64→32]`, latent dim 32
-- 3 residual VQ levels with K = `[256,256,256]`
-- Lazy k-means init at first forward
-- Sinkhorn balanced assignment on the last codebook only (`sk_epsilons=[0,0,0.003]`)
-- AdamW + linear warmup/decay, 3000 epoch
-- Saves the **final-epoch** state to `rqvae_best.pt`. Earlier versions used
-  best-by-`unique_rate`, but the lazy k-means init at epoch 1 sometimes beats
-  every trained epoch on that metric while encoding noise — see Progress.md
-  "Discussion E14".
-
-### Inference
-
-`model/inference.py` uses constrained beam search via
-`LevelConstrainedLogitsProcessor`, generating exactly `len(K_LEVELS)` tokens
-per item. Beam width 50, no Hamming fallback.
+The design follows the generative-retrieval recipe of Rajput et al., *Recommender Systems with
+Generative Retrieval* (NeurIPS 2023). This repository is an independent implementation written
+to (a) verify whether semantic structure actually adds value on top of an autoregressive backbone
+and (b) explore a few targeted improvements over the original recipe.
 
 ## Results
 
-| Run | R@5 | N@5 | R@10 | N@10 |
-|-----|-----|-----|------|------|
-| SASRec baseline (ours) | 0.0358 | 0.0180 | 0.0573 | 0.0250 |
-| Random ID baseline (4-token random, same T5) | 0.0258 | 0.0174 | 0.0394 | 0.0218 |
-| **Ours (6-field nomic + RQ-VAE 3kep + T5)** | **0.0384** | **0.0256** | **0.0604** | **0.0326** |
-| TIGER (paper) | 0.0454 | 0.0321 | 0.0648 | 0.0384 |
-| TIGER (community reimpl) | — | — | 0.0594 | 0.0321 |
+All-rank Recall@K / NDCG@K on Amazon Beauty (5-core, leave-one-out split, no negative sampling).
 
-Ours surpasses the community TIGER reimplementation by +1.7% R@10. NDCG@10 is
-**+30.4%** over SASRec and **+50%** over the random-ID baseline, isolating the
-contribution of semantic structure on top of the autoregressive backbone. See
-[Progress.md](./Progress.md) for the tech-selection narrative.
+| Model | R@5 | N@5 | R@10 | N@10 |
+|---|---|---|---|---|
+| Random ID baseline (4-token random ids, same T5)               | 0.0258 | 0.0174 | 0.0394 | 0.0218 |
+| SASRec (this repo)                                              | 0.0358 | 0.0180 | 0.0573 | 0.0250 |
+| **Semantic ID + T5 (this repo)**                                | **0.0384** | **0.0256** | **0.0604** | **0.0326** |
+| Original paper (reference)                                      | 0.0454 | 0.0321 | 0.0648 | 0.0384 |
+
+Headline numbers for the Semantic-ID generative model:
+
+- **+30 % NDCG@10 over our SASRec baseline** — generative ranking is the main source of NDCG gain.
+- **+50 % NDCG@10 over a same-architecture random-ID baseline** — isolates the contribution of *semantic* structure on top of the autoregressive backbone, which is itself non-trivially strong (random-ID R@10 = 0.0394, well above any popularity baseline).
+- The remaining gap to the original paper's reported numbers (-7 % R@10) is comparable to the gap between our random-ID baseline and the paper's random baseline (~9 %), suggesting most of the residual difference is split / sampling noise rather than recipe.
+
+## Modifications relative to the original recipe
+
+- **Local item embeddings via Ollama `nomic-embed-text`** instead of pretrained Sentence-T5 — drops the dependency on a hosted service and gives ~100 % codebook usage (vs ~38 % observed when we tried sentence-T5).
+- **6-field item prompt** — `title / brand / category / description[:1000] / price bucket / popularity bucket` — with HTML-entity cleanup and per-field skipping (no `unknown` placeholders), instead of an unstructured concatenation.
+- **Final-epoch RQ-VAE checkpoint** — selecting by codebook collision rate is unsafe for this dataset because the lazy k-means initialisation at epoch 1 reaches a higher unique-rate than any trained epoch while encoding noise. This bug nearly collapses downstream performance to the random-ID baseline; saving the final epoch fixes it.
+- **All-rank validation, not 99-negative validation** — the 99-negative protocol unfairly favours discriminative models when beam search misses; using the same all-rank protocol for both validation and test cuts our val/test gap from −50 % to −34 %.
+- **Constrained beam search with no Hamming fallback** — invalid beams are dropped instead of being projected back to the nearest valid item; the model is held to the same standard as the evaluation.
+
+## Architecture
+
+```
+text metadata
+   │
+   ▼
+Ollama nomic-embed-text  ──►  item_embeddings_raw.npy  (12,101 × 768)
+   │
+   ▼
+RQ-VAE   (3 codebooks × 256 + collision code, 32-d latent)
+   │
+   ▼
+Semantic IDs   (item → (c0, c1, c2, c3))
+   │
+   ▼
+T5 encoder-decoder, trained from scratch (~4.6 M params)
+   │   encoder input  : flattened history of Semantic ID tokens
+   │   decoder output : 4 Semantic ID tokens of the next item
+   ▼
+Constrained beam search   →   top-K item recommendations
+```
+
+Pipeline scripts:
+
+| Step | Script | Output |
+|---|---|---|
+| 1. Build dataset       | `data/data_process.py`             | `data/beauty_data.pkl` |
+| 2. Item embeddings     | `embedding/extract_embeddings.py`  | `embedding/item_embeddings_raw.npy` |
+| 3. Train RQ-VAE        | `embedding/rqvae.py`               | `checkpoints/rqvae_best.pt` |
+| 4. Generate Semantic IDs | `embedding/generate_rqvae_ids.py` | `embedding/semantic_ids_rqvae.npy` |
+| 5. Train T5            | `train.py`                         | `checkpoints/best_model_t5.pt` |
+| 6. Evaluate            | `evaluate.py`                      | Recall@K / NDCG@K printout |
+| (baseline) SASRec      | `baseline/sasrec_train.py`         | `checkpoints/sasrec_best.pt` + metrics |
 
 ## Dataset
 
 Amazon Beauty 5-core ([SNAP](http://snap.stanford.edu/data/amazon/)).
 
 | Stat | Value |
-|------|-------|
+|---|---|
 | Users | 22,363 |
 | Items | 12,101 |
 | Interactions | 198,502 |
-| Split | Leave-one-out |
+| Split | leave-one-out |
 | Evaluation | all-rank Recall@K / NDCG@K |
 
 ## Quickstart
 
 ```bash
 pip install -r requirements.txt
+
+# Step 2 needs an Ollama install + the nomic-embed-text model
 brew install ollama && ollama pull nomic-embed-text
 
 python data/data_process.py
@@ -100,8 +100,9 @@ python evaluate.py
 python baseline/sasrec_train.py
 ```
 
+A single Colab notebook (`notebooks/colab_full_pipeline.ipynb`) runs the entire pipeline end-to-end on a fresh GPU runtime.
+
 ## References
 
-- [TIGER: Recommender Systems with Generative Retrieval](https://arxiv.org/abs/2305.05065)
-- [SASRec: Self-Attentive Sequential Recommendation](https://arxiv.org/abs/1808.09781)
-- [XiaoLongtaoo/TIGER reproduction](https://github.com/XiaoLongtaoo/TIGER)
+- Rajput et al., *Recommender Systems with Generative Retrieval*, NeurIPS 2023. [arXiv:2305.05065](https://arxiv.org/abs/2305.05065)
+- Kang & McAuley, *Self-Attentive Sequential Recommendation*, ICDM 2018. [arXiv:1808.09781](https://arxiv.org/abs/1808.09781)

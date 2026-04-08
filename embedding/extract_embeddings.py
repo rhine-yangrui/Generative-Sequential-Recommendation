@@ -1,21 +1,16 @@
 """
-Item embedding 提取：用 Ollama 本地推理调用 ``nomic-embed-text``，把每个 item
-的 6 字段元数据（title / brand / category / description / price / popularity）
-拼成 prompt，得到 768 维 embedding。
+Extract item embeddings with Ollama's local ``nomic-embed-text`` model.
 
-输入：``data/beauty_data.pkl`` 里的 item 元数据
-输出：``embedding/item_embeddings_raw.npy``  (dict[item_id -> np.ndarray])
+For each item we build a 6-field prompt
+(title / brand / category / description / price bucket / popularity bucket)
+and call the embedding API. The result is written as
+``embedding/item_embeddings_raw.npy``  (dict[item_id -> np.ndarray]).
 
-Prompt 6-field 设计（E13）：
-  - Brand / Price range / Popularity 缺失时跳过该行（不写 "unknown"）
-  - Description 截断从 300 → 1000 字符，覆盖 ~p90 的描述长度
-  - Price / salesRank 做离散 bucket，避免文本 embedding 对数字不敏感的问题
+The script supports resuming: existing rows are kept and only missing items
+are processed. **Pass --force whenever the prompt template changes**, otherwise
+old embeddings will be silently reused.
 
-支持断点续传：已存在的 embedding 不会重跑，每 500 条落盘一次。
-**换 prompt 模板后必须 --force，否则续传会跳过所有已处理 item。**
-
-用法：
-    ollama serve &                           # 启动后台服务（一次即可）
+    ollama serve &
     ollama pull nomic-embed-text
     python embedding/extract_embeddings.py --force
 """
@@ -33,14 +28,14 @@ import ollama
 from tqdm import tqdm
 
 
-MODEL     = 'nomic-embed-text'   # 768d，instruction-tuned，速度快
-N_WORKERS = 2                    # 并发数：2 个 worker 速度最优，>2 没有额外提升
-SAVE_EVERY = 500                 # 每多少条 embedding 落盘一次（断点续传粒度）
-DESCRIPTION_MAX_CHARS = 1000     # 覆盖 ~p90 的描述长度（p50≈292，p90≈1030）
+MODEL                 = 'nomic-embed-text'   # 768d, instruction-tuned
+N_WORKERS             = 2                    # 2 workers gives the best throughput here
+SAVE_EVERY            = 500                  # checkpoint frequency for resume support
+DESCRIPTION_MAX_CHARS = 1000                 # ~p90 of description length in this dataset
 
 
 def _price_bucket(price):
-    """USD 价格 → 4 档离散标签；数据分位见 Progress.md。"""
+    """USD price → 4 discrete buckets."""
     if price is None:
         return None
     if price < 10:
@@ -53,7 +48,7 @@ def _price_bucket(price):
 
 
 def _rank_bucket(sales_rank):
-    """Beauty 类目 sales rank → 4 档离散标签（log 切分）。"""
+    """Beauty-category sales rank → 4 discrete buckets (log split)."""
     if sales_rank is None:
         return None
     if sales_rank < 1_000:
@@ -66,7 +61,7 @@ def _rank_bucket(sales_rank):
 
 
 def _get_sales_rank(meta):
-    """salesRank 是 dict（如 {'Beauty': 10486}），优先取 Beauty 条目。"""
+    """``salesRank`` is a category dict; prefer the Beauty entry."""
     sr = meta.get('salesRank')
     if not isinstance(sr, dict) or not sr:
         return None
@@ -76,17 +71,15 @@ def _get_sales_rank(meta):
 
 
 def _clean(s):
-    """Unescape HTML entities in a string field. 原始 meta 里混有 ``&#39;`` / ``&nbsp;`` 等。"""
+    """Unescape HTML entities (``&#39;``, ``&nbsp;``, ...) in text fields."""
     return html.unescape(s) if isinstance(s, str) else s
 
 
 def build_item_prompt(meta):
     """
-    把 item 元数据拼成 6-field prompt。缺失字段整行跳过（不写 "unknown"），
-    避免给缺失值一个可被模型学到的"无信息"token 向量。
-
-    所有文本字段先 html.unescape() 清洗，防止 ``&#39;`` / ``&nbsp;`` 之类的
-    实体污染 embedding 输入。
+    Build a 6-field prompt for one item. Missing fields are skipped instead of
+    being written as ``unknown``, so the embedding model never has to learn a
+    placeholder vector.
     """
     title = _clean(meta.get('title', ''))
     description = meta.get('description', '')
@@ -122,30 +115,28 @@ def extract_all(force=False):
 
     data = pickle.load(open(data_path, 'rb'))
 
-    # 先 ping 一次 Ollama 确认服务可用
+    # Ping Ollama once before launching workers.
     try:
         test_resp = ollama.embeddings(model=MODEL, prompt='test')
-        print(f"Ollama 连接成功，模型: {MODEL}，"
-              f"embedding 维度: {len(test_resp['embedding'])}")
+        print(f'Ollama OK, model={MODEL}, dim={len(test_resp["embedding"])}')
     except Exception as e:
-        print(f"Ollama 连接失败: {e}")
-        print(f"请确保已运行: ollama serve 并已拉取模型: ollama pull {MODEL}")
+        print(f'Ollama connection failed: {e}')
+        print(f'Run: ollama serve  &&  ollama pull {MODEL}')
         sys.exit(1)
 
-    # 断点续传：如果已有部分结果则继续（--force 时绕过）
     if os.path.exists(output_path) and not force:
         embeddings = np.load(output_path, allow_pickle=True).item()
-        print(f"加载已有 embedding: {len(embeddings)} 个")
+        print(f'Resuming from existing file: {len(embeddings)} items')
     else:
         if force and os.path.exists(output_path):
-            print('--force：忽略已存在的 embedding，全量重算')
+            print('--force: ignoring existing embeddings, recomputing all')
         embeddings = {}
 
     items_to_process = [
         (asin, meta) for asin, meta in data['item_metas'].items()
         if data['item2id'].get(asin) not in embeddings
     ]
-    print(f"待处理 item 数: {len(items_to_process)}，并发数: {N_WORKERS}")
+    print(f'#items to process: {len(items_to_process)}  workers: {N_WORKERS}')
 
     lock         = threading.Lock()
     failed       = 0
@@ -173,7 +164,7 @@ def extract_all(force=False):
             if err:
                 failed += 1
                 if failed <= 5:
-                    tqdm.write(f"Skip item {item_id}: {err}")
+                    tqdm.write(f'skip item {item_id}: {err}')
                 continue
             if item_id is None or emb is None:
                 continue
@@ -187,13 +178,13 @@ def extract_all(force=False):
         pbar.close()
 
     np.save(output_path, embeddings)
-    print(f"\nDone: {len(embeddings)} items，失败: {failed} 个")
-    print(f"已保存至 {output_path}")
+    print(f'\nDone: {len(embeddings)} items, {failed} failed')
+    print(f'Saved to {output_path}')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--force', action='store_true',
-                        help='忽略已存在的 embedding，全量重算（换 prompt 模板时必加）')
+                        help='ignore existing embeddings (use after prompt changes)')
     args = parser.parse_args()
     extract_all(force=args.force)

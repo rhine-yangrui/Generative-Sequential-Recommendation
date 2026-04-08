@@ -1,19 +1,10 @@
 """
-评估脚本：All-rank 协议，与 TIGER (NeurIPS 2023) 评估方式一致。
+Evaluate the trained T5 generative recommender with the all-rank protocol.
 
-对每个测试用户，beam search 直接生成 top-K 推荐，
-不做负采样，直接计算 Recall@K 和 NDCG@K。
+For every test user we run constrained beam search to get top-K recommendations
+and report Recall@K / NDCG@K with K in {5, 10}.
 
-与旧版 99 负采样协议的区别：
-  旧协议（99-neg HR@K）：beam search 结果和 100 个候选取交集，
-    对生成模型不公平（beam 未命中 target 时 target 被随机追加）。
-  新协议（all-rank Recall@K）：beam search 结果直接看 target 是否在内，
-    天然匹配生成模型的工作方式，与 TIGER 论文完全一致。
-
-用法：
     python evaluate.py
-    python evaluate.py --semantic-ids semantic_ids_random.npy \
-                       --ckpt checkpoints/best_model_t5_random.pt
 """
 
 import argparse
@@ -28,30 +19,20 @@ from tqdm import tqdm
 from model.generative_rec import build_model
 from model.inference import build_reverse_index, predict_topk_batch
 
-K_LIST     = [5, 10]    # 与 TIGER 论文一致：Recall@5, @10, NDCG@5, @10
-BEAM_WIDTH = 50         # beam search 宽度，越大越准但越慢
-BATCH_SIZE = 256        # 批量 beam search（A100 40GB 够；OOM 就降到 128）
+K_LIST     = [5, 10]
+BEAM_WIDTH = 50
+BATCH_SIZE = 256        # batched beam search; lower if VRAM is tight
 DEFAULT_SEMANTIC_IDS_FILE = 'semantic_ids_rqvae.npy'
 DEFAULT_CKPT              = 'checkpoints/best_model_t5.pt'
 
 
 def compute_metrics(recommended_items, target, k_list):
-    """
-    All-rank 评估指标。
-
-    Args:
-        recommended_items: beam search 生成的推荐列表（已按分数排序）
-        target: 真实目标 item_id
-        k_list: K 值列表
-
-    Returns:
-        dict, {k: {'Recall': 0/1, 'NDCG': float}}
-    """
+    """Per-user metric snapshot for one prediction."""
     results = {}
     for k in k_list:
         topk = recommended_items[:k]
         if target in topk:
-            rank = topk.index(target) + 1  # 从 1 开始
+            rank = topk.index(target) + 1
             results[k] = {'Recall': 1, 'NDCG': 1 / math.log2(rank + 1)}
         else:
             results[k] = {'Recall': 0, 'NDCG': 0.0}
@@ -61,9 +42,7 @@ def compute_metrics(recommended_items, target, k_list):
 def evaluate(model, test_seqs, semantic_ids, sid_to_item, sid_array,
              item_id_list, device, k_list=K_LIST,
              beam_width=BEAM_WIDTH, batch_size=BATCH_SIZE):
-    """
-    All-rank 评估：批量化 beam search，不做负采样。
-    """
+    """Run batched beam search across the whole test split."""
     model.eval()
     metrics = {k: {'Recall': [], 'NDCG': []} for k in k_list}
     max_k   = max(k_list)
@@ -101,7 +80,7 @@ def evaluate(model, test_seqs, semantic_ids, sid_to_item, sid_array,
 def print_results(summary, model_name='Our Model'):
     print(f'\n{"="*60}')
     print(f'  {model_name}')
-    print(f'  评估协议: All-rank (与 TIGER 论文一致)')
+    print(f'  Protocol: all-rank Recall@K / NDCG@K')
     print(f'{"="*60}')
     print(f'  {"K":>4}  {"Recall@K":>10}  {"NDCG@K":>10}')
     print(f'  {"-"*35}')
@@ -109,25 +88,13 @@ def print_results(summary, model_name='Our Model'):
         print(f'  {k:>4}  {summary[k]["Recall"]:>10.4f}  {summary[k]["NDCG"]:>10.4f}')
     print(f'{"="*60}')
 
-    # TIGER 论文参考数字（all-rank，Amazon Beauty）
-    tiger_ref = {
-        'SASRec': {5: (0.0387, 0.0249), 10: (0.0605, 0.0318)},
-        'TIGER':  {5: (0.0454, 0.0321), 10: (0.0648, 0.0384)},
-    }
-    print(f'\n  TIGER 论文参考（all-rank，Amazon Beauty）:')
-    print(f'  {"Model":<10}  {"Recall@5":>10}  {"NDCG@5":>10}  {"Recall@10":>10}  {"NDCG@10":>10}')
-    for name, ref in tiger_ref.items():
-        r5, n5   = ref.get(5,  (0, 0))
-        r10, n10 = ref.get(10, (0, 0))
-        print(f'  {name:<10}  {r5:>10.4f}  {n5:>10.4f}  {r10:>10.4f}  {n10:>10.4f}')
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--semantic-ids', default=DEFAULT_SEMANTIC_IDS_FILE,
-                        help='semantic IDs 文件名（相对 embedding/）')
+                        help='Semantic ID file (relative to embedding/)')
     parser.add_argument('--ckpt', default=DEFAULT_CKPT,
-                        help='checkpoint 路径（相对项目根）')
+                        help='checkpoint path (relative to project root)')
     args = parser.parse_args()
 
     np.random.seed(42)
@@ -139,26 +106,22 @@ if __name__ == '__main__':
         device = 'mps'
     else:
         device = 'cpu'
-    print(f'使用设备: {device}')
+    print(f'Device: {device}')
 
-    # 加载数据
     data         = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
     semantic_ids = np.load(os.path.join(base_dir, 'embedding', args.semantic_ids),
                            allow_pickle=True).item()
     print(f'Semantic IDs: {args.semantic_ids}')
 
-    # 加载模型
     ckpt_path = os.path.join(base_dir, args.ckpt)
     model = build_model().to(device)
     model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
     model.eval()
-    print(f'模型加载成功: {args.ckpt}')
+    print(f'Loaded checkpoint: {args.ckpt}')
 
-    # 构建反向索引
     sid_to_item, sid_array, item_id_list = build_reverse_index(semantic_ids)
 
-    # 评估
-    print(f'\n开始评估（测试集用户数: {len(data["test"])}）...')
+    print(f'\nEvaluating on {len(data["test"])} test users...')
     summary = evaluate(
         model,
         test_seqs    = data['test'],

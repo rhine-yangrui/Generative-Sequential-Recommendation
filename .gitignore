@@ -1,15 +1,12 @@
-# Project planning docs
-PROJECT_PLAN.md
+# Local agent notes
 CLAUDE.md
 Progress.md
-improve_generative_prompt.md
-plan.md
 
-# Data files
+# Data files (raw)
 data/reviews_Beauty_5.json.gz
 data/meta_Beauty.json.gz
 
-# Large embedding files
+# Large embedding / id arrays
 *.npy
 
 # Python

@@ -1,12 +1,11 @@
 """
-RQ-VAE ID Generation: loads `checkpoints/rqvae_best.pt` and writes
-`embedding/semantic_ids_rqvae.npy`.
+Run inference with the trained RQ-VAE and write
+``embedding/semantic_ids_rqvae.npy``.
 
-Each item gets a 4-tuple (c0, c1, c2, c3):
-  - c0/c1/c2: learned RQ-VAE codes (ranges 256 / 256 / 256)
-  - c3: collision-resolution index (0 when no collision, 0..N-1 within a group)
+Each item gets a 4-tuple ``(c0, c1, c2, c3)``:
+  - c0/c1/c2: argmin codes from the 3 residual codebooks (range 0..255)
+  - c3: collision-resolution index (0 if unique, else 0..N-1 within the group)
 
-Usage:
     python embedding/generate_rqvae_ids.py
 """
 
@@ -17,17 +16,17 @@ from collections import defaultdict
 import numpy as np
 import torch
 
-# Make both the embedding/ package (for `rqvae`) and the project root
-# (for `model.tokenizer`) importable when run as `python embedding/generate_rqvae_ids.py`.
+# Make both this directory (for ``rqvae``) and the project root (for
+# ``model.tokenizer``) importable when invoked from the project root.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _THIS_DIR)
 sys.path.insert(0, os.path.dirname(_THIS_DIR))
 
 from rqvae import (
-    RQVAE,
-    CODEBOOK_SIZES,
     BATCH_SIZE,
+    CODEBOOK_SIZES,
     EMBEDDING_FILE,
+    RQVAE,
     select_device,
 )
 from model.tokenizer import K_LEVELS as TOKEN_LAYOUT  # 4-token layout incl. c4
@@ -42,16 +41,10 @@ assert TOKEN_LAYOUT[:3] == CODEBOOK_SIZES, (
 
 def resolve_collisions(semantic_ids_raw):
     """
-    Append a 4th collision-resolution code to each item's (c0, c1, c2) triple.
+    Append a 4th code so that every item has a unique 4-tuple.
 
-    Items with unique (c0,c1,c2) get c3=0.
-    Items in a collision group get c3=0,1,2,... within the group.
-
-    Args:
-        semantic_ids_raw: dict  item_id -> (c0, c1, c2)
-
-    Returns:
-        dict  item_id -> (c0, c1, c2, c3)
+    Items with a unique (c0, c1, c2) get c3=0; items in a collision group get
+    c3 = 0, 1, 2, ... within the group.
     """
     sid_to_items = defaultdict(list)
     for item_id, sid in semantic_ids_raw.items():
@@ -61,14 +54,14 @@ def resolve_collisions(semantic_ids_raw):
     n_collision_items = sum(
         len(items) for items in sid_to_items.values() if len(items) > 1
     )
-    print(f'冲突 Semantic ID 组数: {n_collisions}  涉及 item 数: {n_collision_items}')
+    print(f'collision groups: {n_collisions}  items in collisions: {n_collision_items}')
 
     max_group = max(len(items) for items in sid_to_items.values())
-    print(f'最大 collision group 大小: {max_group}  (c3 容量: {COLLISION_K})')
+    print(f'max group size: {max_group}  (c3 capacity: {COLLISION_K})')
     if max_group > COLLISION_K:
         raise RuntimeError(
-            f'最大 collision group={max_group} 超过 c3 容量 {COLLISION_K}，'
-            '请增大 COLLISION_K 或调整码本大小'
+            f'max collision group {max_group} exceeds c3 capacity {COLLISION_K}; '
+            'increase COLLISION_K or change codebook sizes'
         )
 
     resolved = {}
@@ -81,22 +74,21 @@ def resolve_collisions(semantic_ids_raw):
 
 def generate_ids():
     device = select_device()
-    print(f'使用设备: {device}')
+    print(f'Device: {device}')
 
     emb_dir  = os.path.dirname(os.path.abspath(__file__))
     proj_dir = os.path.dirname(emb_dir)
 
-    # Load embeddings
     raw = np.load(
         os.path.join(emb_dir, EMBEDDING_FILE),
         allow_pickle=True,
     ).item()
-    print(f'Embedding 源: {EMBEDDING_FILE}')
+    print(f'Embeddings: {EMBEDDING_FILE}')
 
     item_ids   = sorted(raw.keys())
     emb_matrix = np.stack([raw[i] for i in item_ids]).astype(np.float32)
-    # 不做 L2 normalize：与 rqvae.py 训练时保持一致
-    print(f'加载 embedding: {emb_matrix.shape}')
+    # Same preprocessing as training: no L2 normalisation.
+    print(f'Loaded embedding matrix: {emb_matrix.shape}')
 
     in_dim = emb_matrix.shape[1]
     data_tensor = torch.from_numpy(emb_matrix).to(device)
@@ -107,16 +99,15 @@ def generate_ids():
     model = RQVAE(in_dim=ckpt.get('in_dim', in_dim)).to(device)
     model.load_state_dict(ckpt['state_dict'])
     model.eval()
-    print(f'加载 checkpoint: {ckpt_path}  epoch={ckpt.get("epoch", "?")}  '
+    print(f'Loaded ckpt: {ckpt_path}  epoch={ckpt.get("epoch", "?")}  '
           f'unique_rate={ckpt.get("unique_rate", "?")}')
 
-    # Extract 3-level codes
-    print('提取 Semantic IDs...')
+    print('Extracting Semantic IDs...')
     chunks = []
     with torch.no_grad():
         for i in range(0, n_items, BATCH_SIZE):
             batch = data_tensor[i:i + BATCH_SIZE]
-            indices = model.get_indices(batch, use_sk=False)  # (B, n_levels)
+            indices = model.get_indices(batch, use_sk=False)
             chunks.append(indices.cpu())
     all_codes = torch.cat(chunks, dim=0).numpy()  # (N, n_levels)
 
@@ -125,27 +116,25 @@ def generate_ids():
         for idx, item_id in enumerate(item_ids)
     }
 
-    # Resolve collisions → add c3
     semantic_ids = resolve_collisions(semantic_ids_raw)
 
-    # Verify uniqueness
     all_sids = [tuple(v) for v in semantic_ids.values()]
     unique_count = len(set(all_sids))
-    print(f'解决后唯一 Semantic ID 数: {unique_count} / {len(all_sids)}')
-    assert unique_count == len(all_sids), '仍有冲突，请检查 COLLISION_K'
+    print(f'unique semantic ids after collision resolution: '
+          f'{unique_count} / {len(all_sids)}')
+    assert unique_count == len(all_sids), 'collisions remain — check COLLISION_K'
 
     output_path = os.path.join(emb_dir, 'semantic_ids_rqvae.npy')
     np.save(output_path, semantic_ids)
-    print(f'已保存至 {output_path}')
+    print(f'Saved to {output_path}')
 
-    # Sanity checks
-    print('\n--- Sanity Check ---')
-    print(f'总 item 数: {len(semantic_ids)}')
+    print('\n--- sanity check ---')
+    print(f'#items: {len(semantic_ids)}')
     for lvl in range(len(CODEBOOK_SIZES)):
         used = len({v[lvl] for v in semantic_ids.values()})
-        print(f'c{lvl} 使用码数: {used} / {CODEBOOK_SIZES[lvl]}')
+        print(f'c{lvl} used: {used} / {CODEBOOK_SIZES[lvl]}')
     c3_max = max(v[3] for v in semantic_ids.values())
-    print(f'c3 最大值: {c3_max}  (容量: {COLLISION_K})')
+    print(f'c3 max value: {c3_max}  (capacity: {COLLISION_K})')
 
 
 if __name__ == '__main__':

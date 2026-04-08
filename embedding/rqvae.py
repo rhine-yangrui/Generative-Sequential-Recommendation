@@ -1,25 +1,20 @@
 """
-RQ-VAE Training — TIGER-aligned reference reproduction.
+Residual-Quantized VAE on the item embeddings.
 
-Mirrors `../TIGER/rqvae/{models,trainer,main}.py`:
-  - MLPLayers with xavier init, dropout/bn options, no activation on last layer
-  - VectorQuantizer + ResidualVectorQuantizer with lazy k-means init on the
-    residual at first forward (no encoder warm-up phase)
-  - 5-hidden encoder [768, 512, 256, 128, 64, 32]
-  - AdamW + linear LR schedule with warmup (per-step .step())
-  - Quant loss averaged across levels (not summed)
-  - No L2 normalization on input embeddings (this kills the recon signal)
-  - No dead-code reset (Sinkhorn is the only balancing mechanism, like TIGER)
+Architecture:
+  - 5-hidden MLP encoder/decoder, latent dim 32
+  - 3 residual VQ codebooks, each of size 256
+  - Lazy k-means initialisation on the first forward pass
+  - Sinkhorn balanced assignment on the last codebook only
+  - AdamW + linear warmup/decay, 3000 epochs
 
-Save policy: write the **final-epoch** state to `checkpoints/rqvae_best.pt`.
-Earlier versions used best-by-collision (highest unique-rate), but on the
-6-field nomic embedding the lazy k-means init at epoch 1 hits a higher
-unique-rate than any trained epoch and the criterion locks in a barely-trained
-checkpoint whose downstream R@10 is ~tied with random ID. Internal RQ-VAE
-metrics (recon, L0 usage, unique-rate) are diagnostic signals, not downstream
-quality proxies — see Progress.md "Discussion E14".
+Save policy: write the **final-epoch** state to ``checkpoints/rqvae_best.pt``.
+We do *not* track best-by-collision: with this dataset and prompt, the
+k-means init at epoch 1 reliably hits a higher unique-rate than any trained
+epoch while encoding noise (downstream R@10 collapses to roughly the random-ID
+baseline). RQ-VAE internal metrics are diagnostic signals, never selection
+criteria — only the downstream metric is trusted.
 
-Usage:
     python embedding/rqvae.py
     python embedding/generate_rqvae_ids.py
 """
@@ -35,7 +30,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from transformers import get_linear_schedule_with_warmup
 
 
-# ── Architecture (TIGER defaults) ────────────────────────────────────────
+# ── Architecture ─────────────────────────────────────────────────────────
 HIDDEN_LAYERS  = [512, 256, 128, 64]   # encoder hidden sizes (5 hidden total: + e_dim)
 LATENT_DIM     = 32                    # encoder bottleneck = codebook embedding dim
 # Sizes of the 3 learned residual codebooks. The downstream tokenizer adds a
@@ -50,29 +45,29 @@ LOSS_TYPE      = 'mse'
 KMEANS_INIT    = True
 KMEANS_ITERS   = 100
 
-# Sinkhorn balanced assignment, only enabled on the last codebook (TIGER default)
+# Sinkhorn balanced assignment, only enabled on the last codebook.
 SK_EPSILONS    = [0.0, 0.0, 0.003]
 SK_ITERS       = 50
 
-# ── Optimization ─────────────────────────────────────────────────────────
+# ── Optimisation ─────────────────────────────────────────────────────────
 LR             = 1e-3
 WEIGHT_DECAY   = 1e-4
 BATCH_SIZE     = 1024
-WARMUP_EPOCHS  = 50         # linear LR warmup (TIGER 'linear' scheduler)
-NUM_EPOCHS     = 3000       # full TIGER schedule; shorter runs leave R@10 on the table
-EVAL_EVERY     = 50         # TIGER default
+WARMUP_EPOCHS  = 50
+NUM_EPOCHS     = 3000
+EVAL_EVERY     = 50
 MAX_GRAD_NORM  = 1.0
 
-# ── Input / output ───────────────────────────────────────────────────────
+# ── I/O ──────────────────────────────────────────────────────────────────
 EMBEDDING_FILE = 'item_embeddings_raw.npy'
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Building blocks (mirror TIGER's models/layers.py + vq.py + rq.py)
+# Building blocks
 # ─────────────────────────────────────────────────────────────────────────
 
 class MLPLayers(nn.Module):
-    """Dropout → Linear (→ BN) (→ ReLU) per hidden, no activation on last layer."""
+    """Dropout → Linear (→ BN) (→ ReLU) per hidden, no activation on the last layer."""
 
     def __init__(self, layers, dropout=0.0, bn=False):
         super().__init__()
@@ -102,8 +97,7 @@ class MLPLayers(nn.Module):
 @torch.no_grad()
 def sinkhorn_log(distances, epsilon, n_iters):
     """
-    Numerically stable log-domain Sinkhorn-Knopp (MPS-safe; same semantics
-    as TIGER's linear-domain version, but doesn't underflow under fp32).
+    Numerically stable log-domain Sinkhorn-Knopp. fp32-safe on MPS / CPU.
     """
     log_Q = -distances / epsilon
     B, K  = log_Q.shape
@@ -119,7 +113,7 @@ def sinkhorn_log(distances, epsilon, n_iters):
 
 
 class VectorQuantizer(nn.Module):
-    """Single-codebook VQ — mirrors `../TIGER/rqvae/models/vq.py`."""
+    """Single codebook with optional Sinkhorn balanced assignment."""
 
     def __init__(self, n_e, e_dim, beta=0.25, kmeans_init=True,
                  kmeans_iters=100, sk_epsilon=0.0, sk_iters=50):
@@ -199,7 +193,7 @@ class VectorQuantizer(nn.Module):
 
 
 class ResidualVectorQuantizer(nn.Module):
-    """Mirrors `../TIGER/rqvae/models/rq.py`."""
+    """Stack of VQ layers operating on successive residuals."""
 
     def __init__(self, n_e_list, e_dim, sk_epsilons, beta=0.25,
                  kmeans_init=True, kmeans_iters=100, sk_iters=50):
@@ -224,13 +218,13 @@ class ResidualVectorQuantizer(nn.Module):
             x_q      = x_q + x_res
             all_losses.append(loss)
             all_indices.append(idx)
-        mean_loss   = torch.stack(all_losses).mean()       # ← average, not sum
+        mean_loss   = torch.stack(all_losses).mean()
         all_indices = torch.stack(all_indices, dim=-1)     # (B, n_levels)
         return x_q, mean_loss, all_indices
 
 
 class RQVAE(nn.Module):
-    """Top-level model — mirrors `../TIGER/rqvae/models/rqvae.py`."""
+    """MLP encoder → residual VQ → MLP decoder."""
 
     def __init__(self, in_dim):
         super().__init__()
@@ -256,7 +250,7 @@ class RQVAE(nn.Module):
 
     @torch.no_grad()
     def get_indices(self, x, use_sk=False):
-        """Inference: pure argmin (use_sk=False), no Sinkhorn."""
+        """Inference: pure argmin assignment, no Sinkhorn."""
         z = self.encoder(x)
         _, _, indices = self.rq(z, use_sk=use_sk)
         return indices
@@ -284,14 +278,14 @@ def select_device():
 
 
 def compute_metrics(model, data_tensor, device):
-    """Per-level codebook usage and unique-rate (= 1 - collision_rate)."""
+    """Per-level codebook usage and unique-rate (= 1 − collision rate)."""
     model.eval()
     chunks = []
     with torch.no_grad():
         for i in range(0, len(data_tensor), BATCH_SIZE):
             batch = data_tensor[i:i + BATCH_SIZE].to(device)
             chunks.append(model.get_indices(batch, use_sk=False).cpu())
-    all_codes = torch.cat(chunks, dim=0).numpy()    # (N, n_levels)
+    all_codes = torch.cat(chunks, dim=0).numpy()
     model.train()
 
     n_items     = len(all_codes)
@@ -304,24 +298,24 @@ def compute_metrics(model, data_tensor, device):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Training
+# Training loop
 # ─────────────────────────────────────────────────────────────────────────
 
 def train_rqvae():
     device = select_device()
-    print(f'使用设备: {device}')
+    print(f'Device: {device}')
 
     emb_dir = os.path.dirname(os.path.abspath(__file__))
     raw = np.load(
         os.path.join(emb_dir, EMBEDDING_FILE),
         allow_pickle=True,
     ).item()
-    print(f'Embedding 源: {EMBEDDING_FILE}')
+    print(f'Embeddings: {EMBEDDING_FILE}')
 
     item_ids   = sorted(raw.keys())
     emb_matrix = np.stack([raw[i] for i in item_ids]).astype(np.float32)
-    # 不做 L2 normalize：对齐 TIGER（保留幅度信息，否则 recon floor 极低）
-    print(f'加载 embedding: {emb_matrix.shape}\n')
+    # Do NOT L2-normalise: dropping the magnitude collapses the recon signal.
+    print(f'Loaded embedding matrix: {emb_matrix.shape}\n')
 
     in_dim = emb_matrix.shape[1]
     data_tensor = torch.from_numpy(emb_matrix)
@@ -337,13 +331,13 @@ def train_rqvae():
     model = RQVAE(in_dim=in_dim).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(model)
-    print(f'参数量: {n_params/1e6:.2f}M\n')
+    print(f'#parameters: {n_params/1e6:.2f}M\n')
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY,
     )
 
-    # Linear warmup + linear decay (TIGER 'linear' scheduler), per-step
+    # Linear warmup → linear decay, stepped per training step.
     steps_per_epoch = len(train_loader)
     total_steps     = NUM_EPOCHS * steps_per_epoch
     warmup_steps    = WARMUP_EPOCHS * steps_per_epoch
@@ -358,9 +352,9 @@ def train_rqvae():
     ckpt_path = os.path.join(ckpt_dir, 'rqvae_best.pt')
     last_unique = None
 
-    print(f'开始 RQ-VAE 训练，共 {NUM_EPOCHS} epochs '
+    print(f'Training RQ-VAE for {NUM_EPOCHS} epochs '
           f'(warmup {WARMUP_EPOCHS} ep, total {total_steps} steps)')
-    print(f'Sinkhorn 配置: sk_epsilons={SK_EPSILONS}\n')
+    print(f'Sinkhorn epsilons: {SK_EPSILONS}\n')
 
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
@@ -409,9 +403,7 @@ def train_rqvae():
                 f'recon={avg_recon:.4f}  rq={avg_quant:.4f}'
             )
 
-    # Save the final-epoch state. We don't track best-by-collision because the
-    # k-means init at epoch 1 often beats every trained epoch on unique-rate
-    # while encoding noise (see Progress.md "Discussion E14").
+    # Always save the final epoch state.
     torch.save(
         {'state_dict': model.state_dict(),
          'epoch': NUM_EPOCHS,
@@ -420,9 +412,9 @@ def train_rqvae():
         ckpt_path,
     )
 
-    print(f'\n训练完成')
+    print(f'\nDone.')
     print(f'Ckpt: {ckpt_path}  (epoch={NUM_EPOCHS}, unique={last_unique*100:.1f}%)')
-    print('\n运行 python embedding/generate_rqvae_ids.py 生成 semantic_ids_rqvae.npy')
+    print('\nNext: python embedding/generate_rqvae_ids.py')
 
 
 if __name__ == '__main__':

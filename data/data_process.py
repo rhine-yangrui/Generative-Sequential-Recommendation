@@ -1,11 +1,11 @@
 """
-Amazon Beauty 5-core 数据处理：从原始 review/meta 文件构建训练所需的
-用户序列、ID 映射和 item 元数据，写入 ``data/beauty_data.pkl``。
+Process the Amazon Beauty 5-core dataset into ``data/beauty_data.pkl``.
 
-输出的 pickle 包含：
-    train / val / test  : dict[user_id -> List[item_id]]，leave-one-out 划分
-    item2id             : dict[asin -> int]，item ID 从 1 开始（0 留给 padding）
-    item_metas          : dict[asin -> meta dict]，用于后续 embedding 提取
+The output pickle contains:
+    train / val / test : dict[user_id -> List[item_id]], leave-one-out split
+    item2id            : dict[asin -> int], item ids start at 1 (0 is padding)
+    item_metas         : dict[asin -> meta dict], used downstream by the
+                         embedding extractor
 """
 
 import ast
@@ -16,16 +16,16 @@ from collections import defaultdict
 
 
 def load_and_process(review_path, meta_path, min_interactions=5):
-    # 1. 读取评论
+    # 1. Read raw reviews.
     reviews = []
     with gzip.open(review_path, 'rb') as f:
         for line in f:
             d = json.loads(line)
             reviews.append((d['reviewerID'], d['asin'], d['unixReviewTime']))
 
-    print(f"原始交互数: {len(reviews)}")
+    print(f'#raw interactions: {len(reviews)}')
 
-    # 2. 5-core 过滤
+    # 2. 5-core filtering on both users and items.
     user_cnt = defaultdict(int)
     item_cnt = defaultdict(int)
     for u, i, t in reviews:
@@ -34,13 +34,13 @@ def load_and_process(review_path, meta_path, min_interactions=5):
     filtered = [(u, i, t) for u, i, t in reviews
                 if user_cnt[u] >= min_interactions and item_cnt[i] >= min_interactions]
 
-    print(f"5-core 过滤后交互数: {len(filtered)}")
+    print(f'#interactions after 5-core filter: {len(filtered)}')
 
-    # 3. 构建映射（item ID 从 1 开始，0 留给 padding）
+    # 3. Item ids start at 1 (0 is reserved for padding).
     items = sorted(set(i for _, i, _ in filtered))
     item2id = {item: idx + 1 for idx, item in enumerate(items)}
 
-    # 4. 按用户排序，leave-one-out 划分
+    # 4. Sort by timestamp, leave-one-out split per user.
     user_seqs = defaultdict(list)
     for u, i, t in sorted(filtered, key=lambda x: x[2]):
         user_seqs[u].append(item2id[i])
@@ -50,11 +50,11 @@ def load_and_process(review_path, meta_path, min_interactions=5):
         if len(seq) < 3:
             continue
         train[u] = seq[:-2]
-        val[u]   = seq[:-1]   # 训练序列 + 倒数第二个作为 val target
-        test[u]  = seq        # 训练序列 + 最后一个作为 test target
+        val[u]   = seq[:-1]   # train + last-but-one as val target
+        test[u]  = seq        # train + last as test target
 
-    # 5. 读取 item 元数据（用于 LLM embedding 提取）
-    # meta 文件是 Python dict 字面量格式（单引号），需用 ast.literal_eval 解析
+    # 5. Item metadata. The Amazon meta files use Python dict literal syntax
+    # (single quotes), so json.loads doesn't work — use ast.literal_eval.
     item_metas = {}
     with gzip.open(meta_path, 'rb') as f:
         for line in f:
@@ -65,8 +65,8 @@ def load_and_process(review_path, meta_path, min_interactions=5):
             if d.get('asin') in item2id:
                 item_metas[d['asin']] = d
 
-    print(f"用户数: {len(train)}, item 数: {len(item2id)}")
-    print(f"有元数据的 item 数: {len(item_metas)}")
+    print(f'#users: {len(train)}  #items: {len(item2id)}')
+    print(f'#items with metadata: {len(item_metas)}')
     return train, val, test, item2id, item_metas
 
 
@@ -82,5 +82,5 @@ if __name__ == '__main__':
         'train': train, 'val': val, 'test': test,
         'item2id': item2id, 'item_metas': item_metas
     }, open(output_path, 'wb'))
-    print(f"已保存至 {output_path}")
-    # 预期：用户数 ~22,363，item 数 ~12,101
+    print(f'Saved to {output_path}')
+    # Expected: ~22,363 users, ~12,101 items.

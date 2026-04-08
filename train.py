@@ -1,12 +1,10 @@
 """
-训练脚本：T5 encoder-decoder 生成式推荐，对齐 TIGER 参考实现。
+Train the T5 generative recommender on Semantic IDs.
 
-用法：
     python train.py
-    python train.py --semantic-ids semantic_ids_random.npy \
-                    --ckpt checkpoints/best_model_t5_random.pt
 
-训练完成后模型保存至 --ckpt 指定路径（默认 checkpoints/best_model_t5.pt）。
+The trained model is saved to ``checkpoints/best_model_t5.pt`` (override
+with ``--ckpt``). Early stopping is driven by validation NDCG@10.
 """
 
 import argparse
@@ -18,24 +16,28 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 
-from model.tokenizer import (
-    seq_to_t5_tokens, item_to_tokens, VOCAB_SIZE, PAD_TOKEN, K_LEVELS
-)
 from model.generative_rec import build_model, count_parameters
 from model.inference import build_reverse_index, predict_topk_batch
+from model.tokenizer import (
+    K_LEVELS,
+    PAD_TOKEN,
+    VOCAB_SIZE,
+    item_to_tokens,
+    seq_to_t5_tokens,
+)
 
-# ── 超参数（对齐 ../TIGER/model/main.py）─────────────────────────────────
+# ── Hyper-parameters ─────────────────────────────────────────────────────
 CONFIG = {
     'maxlen':      20,
-    'batch_size':  512,     # batch 256 只吃 16/40 GB A100；翻倍到 512 仍在显存内
-    'lr':          1e-4,    # TIGER 原值，常数 LR 无 scheduler
-    'num_epochs':  200,     # 对齐 TIGER 完整训练时长
-    'val_every':   2,       # 全量 val 较慢，每 2 epoch 评估一次
-    'patience':    10,      # 对齐 TIGER
-    'val_beam':    30,      # 对齐 TIGER 训练评估 beam_size
-    'val_batch':   256,     # beam search 比训练吃显存，不跟 train batch 一起涨
+    'batch_size':  512,    # comfortable on a 40 GB A100; lower if OOM
+    'lr':          1e-4,
+    'num_epochs':  200,
+    'val_every':   2,      # full validation is expensive; evaluate every 2 epochs
+    'patience':    10,
+    'val_beam':    30,
+    'val_batch':   256,
 }
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -48,15 +50,13 @@ ENC_LEN    = CONFIG['maxlen'] * TARGET_LEN
 
 class RecDataset(Dataset):
     """
-    T5 推荐数据集：history → encoder 输入，target item Semantic ID → decoder labels。
+    Encoder input  = flattened history token sequence (left-padded)
+    Decoder labels = next item's Semantic ID tokens
 
-    augment=True（训练）：滑动窗口，每个位置都生成一条样本。
-    augment=False（验证）：每用户只预测最后一个 item。
-
-    每条样本固定形状：
-        history_tokens: ENC_LEN 个 token，左 PAD
-        target_tokens:  TARGET_LEN 个 token
+    ``augment=True``  : sliding-window augmentation, every position becomes a sample
+    ``augment=False`` : one sample per user (predict the last item only)
     """
+
     def __init__(self, user_seqs, semantic_ids, maxlen=20, augment=True):
         self.samples = []
         skipped = 0
@@ -85,7 +85,7 @@ class RecDataset(Dataset):
                 self.samples.append((history_tokens, target_tokens))
 
         if skipped:
-            print(f'  跳过 {skipped} 个样本')
+            print(f'  skipped {skipped} samples')
 
     def __len__(self):
         return len(self.samples)
@@ -95,12 +95,6 @@ class RecDataset(Dataset):
 
 
 def collate_fn(batch):
-    """
-    输出：
-      input_ids:      (B, ENC_LEN)
-      attention_mask: (B, ENC_LEN)，PAD 位置为 0
-      labels:         (B, TARGET_LEN)，T5 内部自动 shift right
-    """
     input_ids = torch.tensor([h for h, _ in batch], dtype=torch.long)
     labels    = torch.tensor([t for _, t in batch], dtype=torch.long)
     attention_mask = (input_ids != PAD_TOKEN).long()
@@ -110,9 +104,8 @@ def collate_fn(batch):
 def evaluate_full_val(model, val_seqs, semantic_ids, device,
                       k=10, beam_width=30, batch_size=64):
     """
-    全量 val 评估，对齐 SASRec / TIGER：固定顺序、所有用户、与 test 一致的 beam。
-    使用 predict_topk_batch 批量化，避免单用户串行 generate。
-    返回 (Recall@k, NDCG@k)。
+    Full all-rank validation pass: identical protocol to ``evaluate.py``,
+    just with a smaller beam to keep per-epoch wall time bounded.
     """
     sid_to_item, sid_array, item_id_list = build_reverse_index(semantic_ids)
     model.eval()
@@ -163,9 +156,9 @@ def train(semantic_ids_file=DEFAULT_SEMANTIC_IDS_FILE,
         device = torch.device('mps')
     else:
         device = torch.device('cpu')
-    print(f'使用设备: {device}')
+    print(f'Device     : {device}')
     print(f'Semantic IDs: {semantic_ids_file}')
-    print(f'Checkpoint:   {ckpt_file}')
+    print(f'Checkpoint  : {ckpt_file}')
 
     base_dir     = os.path.dirname(os.path.abspath(__file__))
     data         = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
@@ -174,11 +167,11 @@ def train(semantic_ids_file=DEFAULT_SEMANTIC_IDS_FILE,
 
     train_seqs = data['train']
     val_seqs   = data['val']
-    print(f'训练用户数: {len(train_seqs)},  验证用户数: {len(val_seqs)}')
+    print(f'#train users: {len(train_seqs)}  #val users: {len(val_seqs)}')
 
-    print('构建训练集（滑动窗口增强）...')
+    print('Building training set (sliding-window augmentation)...')
     train_dataset = RecDataset(train_seqs, semantic_ids, CONFIG['maxlen'], augment=True)
-    print(f'  训练样本数: {len(train_dataset)}')
+    print(f'  #train samples: {len(train_dataset)}')
 
     train_loader = DataLoader(
         train_dataset, batch_size=CONFIG['batch_size'],
@@ -188,10 +181,11 @@ def train(semantic_ids_file=DEFAULT_SEMANTIC_IDS_FILE,
     )
 
     model = build_model().to(device)
-    print(f'\n模型参数量: {count_parameters(model) / 1e6:.1f}M')
-    print(f'词表大小: {VOCAB_SIZE}')
+    print(f'\n#parameters: {count_parameters(model) / 1e6:.1f}M')
+    print(f'vocab size : {VOCAB_SIZE}')
 
-    # 对齐 TIGER：Adam，无 weight_decay，常数 LR（不用 scheduler）
+    # Plain Adam, no weight decay, no LR scheduler. We tried CosineAnnealingLR
+    # earlier and it killed the LR while validation was still improving.
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
 
     os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
@@ -199,7 +193,7 @@ def train(semantic_ids_file=DEFAULT_SEMANTIC_IDS_FILE,
     best_val_ndcg  = 0.0
     patience_count = 0
 
-    print(f'\n开始训练，共 {CONFIG["num_epochs"]} epochs\n')
+    print(f'\nTraining for up to {CONFIG["num_epochs"]} epochs\n')
     for epoch in range(1, CONFIG['num_epochs'] + 1):
         model.train()
         total_loss = 0.0
@@ -237,25 +231,25 @@ def train(semantic_ids_file=DEFAULT_SEMANTIC_IDS_FILE,
                 best_val_ndcg  = val_ndcg
                 patience_count = 0
                 torch.save(model.state_dict(), ckpt_path)
-                print(f'  ✓ 保存最优模型 (val_N@10={best_val_ndcg:.4f})')
+                print(f'  saved best (val_N@10={best_val_ndcg:.4f})')
             else:
                 patience_count += 1
                 if patience_count >= CONFIG['patience']:
-                    print(f'\nEarly stopping（连续 {CONFIG["patience"]} 次未提升）')
+                    print(f'\nEarly stopping after {CONFIG["patience"]} stalled evals')
                     break
         else:
             print(f'Epoch {epoch:3d}/{CONFIG["num_epochs"]}  train_loss={avg_train_loss:.4f}')
 
-    print(f'\n训练完成，最优 val_NDCG@10={best_val_ndcg:.4f}')
-    print(f'模型已保存至 {ckpt_path}')
+    print(f'\nDone. best val_NDCG@10 = {best_val_ndcg:.4f}')
+    print(f'Saved to {ckpt_path}')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--semantic-ids', default=DEFAULT_SEMANTIC_IDS_FILE,
-                        help='semantic IDs 文件名（相对 embedding/）')
+                        help='Semantic ID file (relative to embedding/)')
     parser.add_argument('--ckpt', default=DEFAULT_CKPT_FILE,
-                        help='checkpoint 保存路径（相对项目根）')
+                        help='checkpoint output path (relative to project root)')
     args = parser.parse_args()
 
     random.seed(42)
