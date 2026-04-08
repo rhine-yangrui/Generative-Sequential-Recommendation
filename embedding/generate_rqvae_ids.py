@@ -1,21 +1,15 @@
 """
-RQ-VAE ID Generation: loads a checkpoints/rqvae_*.pt and writes
-embedding/semantic_ids_rqvae*.npy.
+RQ-VAE ID Generation: loads `checkpoints/rqvae_best.pt` and writes
+`embedding/semantic_ids_rqvae.npy`.
 
 Each item gets a 4-tuple (c0, c1, c2, c3):
   - c0/c1/c2: learned RQ-VAE codes (ranges 256 / 256 / 256)
   - c3: collision-resolution index (0 when no collision, 0..N-1 within a group)
 
 Usage:
-    # default: best ckpt → canonical SID file
     python embedding/generate_rqvae_ids.py
-
-    # final ckpt → variant SID file (for A/B against best)
-    python embedding/generate_rqvae_ids.py --ckpt rqvae_final.pt \\
-                                           --out semantic_ids_rqvae_final.npy
 """
 
-import argparse
 import os
 import sys
 from collections import defaultdict
@@ -85,7 +79,7 @@ def resolve_collisions(semantic_ids_raw):
     return resolved
 
 
-def generate_ids(ckpt_file='rqvae_best.pt', out_file='semantic_ids_rqvae.npy'):
+def generate_ids():
     device = select_device()
     print(f'使用设备: {device}')
 
@@ -108,7 +102,7 @@ def generate_ids(ckpt_file='rqvae_best.pt', out_file='semantic_ids_rqvae.npy'):
     data_tensor = torch.from_numpy(emb_matrix).to(device)
     n_items = len(data_tensor)
 
-    ckpt_path = os.path.join(proj_dir, 'checkpoints', ckpt_file)
+    ckpt_path = os.path.join(proj_dir, 'checkpoints', 'rqvae_best.pt')
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     model = RQVAE(in_dim=ckpt.get('in_dim', in_dim)).to(device)
     model.load_state_dict(ckpt['state_dict'])
@@ -140,7 +134,7 @@ def generate_ids(ckpt_file='rqvae_best.pt', out_file='semantic_ids_rqvae.npy'):
     print(f'解决后唯一 Semantic ID 数: {unique_count} / {len(all_sids)}')
     assert unique_count == len(all_sids), '仍有冲突，请检查 COLLISION_K'
 
-    output_path = os.path.join(emb_dir, out_file)
+    output_path = os.path.join(emb_dir, 'semantic_ids_rqvae.npy')
     np.save(output_path, semantic_ids)
     print(f'已保存至 {output_path}')
 
@@ -155,11 +149,4 @@ def generate_ids(ckpt_file='rqvae_best.pt', out_file='semantic_ids_rqvae.npy'):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--ckpt', default='rqvae_best.pt',
-                        help='checkpoint filename in checkpoints/ '
-                             '(rqvae_best.pt | rqvae_final.pt)')
-    parser.add_argument('--out', default='semantic_ids_rqvae.npy',
-                        help='output filename in embedding/')
-    args = parser.parse_args()
-    generate_ids(ckpt_file=args.ckpt, out_file=args.out)
+    generate_ids()

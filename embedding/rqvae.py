@@ -11,8 +11,13 @@ Mirrors `../TIGER/rqvae/{models,trainer,main}.py`:
   - No L2 normalization on input embeddings (this kills the recon signal)
   - No dead-code reset (Sinkhorn is the only balancing mechanism, like TIGER)
 
-Best checkpoint (highest unique-rate = lowest collision) saved to
-`checkpoints/rqvae_best.pt`, matching TIGER's generate_code.py default.
+Save policy: write the **final-epoch** state to `checkpoints/rqvae_best.pt`.
+Earlier versions used best-by-collision (highest unique-rate), but on the
+6-field nomic embedding the lazy k-means init at epoch 1 hits a higher
+unique-rate than any trained epoch and the criterion locks in a barely-trained
+checkpoint whose downstream R@10 is ~tied with random ID. Internal RQ-VAE
+metrics (recon, L0 usage, unique-rate) are diagnostic signals, not downstream
+quality proxies — see Progress.md "Discussion E14".
 
 Usage:
     python embedding/rqvae.py
@@ -350,9 +355,7 @@ def train_rqvae():
 
     ckpt_dir = os.path.join(os.path.dirname(emb_dir), 'checkpoints')
     os.makedirs(ckpt_dir, exist_ok=True)
-    best_ckpt_path  = os.path.join(ckpt_dir, 'rqvae_best.pt')
-    final_ckpt_path = os.path.join(ckpt_dir, 'rqvae_final.pt')
-    best_coll = float('inf')
+    ckpt_path = os.path.join(ckpt_dir, 'rqvae_best.pt')
     last_unique = None
 
     print(f'开始 RQ-VAE 训练，共 {NUM_EPOCHS} epochs '
@@ -400,43 +403,26 @@ def train_rqvae():
                 f'loss={avg_loss:.4f}  recon={avg_recon:.4f}  rq={avg_quant:.4f}  '
                 f'unique={unique*100:.1f}%  usage: {usage_str}'
             )
-
-            collision = 1.0 - unique
-            if collision < best_coll:
-                best_coll = collision
-                torch.save(
-                    {'state_dict': model.state_dict(),
-                     'epoch': epoch,
-                     'unique_rate': unique,
-                     'in_dim': in_dim},
-                    best_ckpt_path,
-                )
-                print(f'  ✓ best ckpt (collision={best_coll:.4f})')
         else:
             print(
                 f'Epoch {epoch:4d}  loss={avg_loss:.4f}  '
                 f'recon={avg_recon:.4f}  rq={avg_quant:.4f}'
             )
 
-    # Always save the final-epoch state alongside best-by-collision so we can
-    # A/B compare downstream. The "best" save criterion (1 - unique_rate) often
-    # locks in the lazy k-means init at epoch 1; the final ckpt lets us check
-    # whether subsequent training actually helps SID quality.
+    # Save the final-epoch state. We don't track best-by-collision because the
+    # k-means init at epoch 1 often beats every trained epoch on unique-rate
+    # while encoding noise (see Progress.md "Discussion E14").
     torch.save(
         {'state_dict': model.state_dict(),
          'epoch': NUM_EPOCHS,
          'unique_rate': last_unique,
          'in_dim': in_dim},
-        final_ckpt_path,
+        ckpt_path,
     )
 
-    print(f'\n训练完成  best_collision={best_coll:.4f}')
-    print(f'Best ckpt:  {best_ckpt_path}')
-    print(f'Final ckpt: {final_ckpt_path}  '
-          f'(epoch={NUM_EPOCHS}, unique={last_unique*100:.1f}%)')
+    print(f'\n训练完成')
+    print(f'Ckpt: {ckpt_path}  (epoch={NUM_EPOCHS}, unique={last_unique*100:.1f}%)')
     print('\n运行 python embedding/generate_rqvae_ids.py 生成 semantic_ids_rqvae.npy')
-    print('   或 python embedding/generate_rqvae_ids.py --ckpt rqvae_final.pt '
-          '--out semantic_ids_rqvae_final.npy')
 
 
 if __name__ == '__main__':

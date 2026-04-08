@@ -45,7 +45,10 @@ generative path.
 - Lazy k-means init at first forward
 - Sinkhorn balanced assignment on the last codebook only (`sk_epsilons=[0,0,0.003]`)
 - AdamW + linear warmup/decay, 3000 epoch
-- Saves the checkpoint with the highest `unique_rate` as `rqvae_best.pt`
+- Saves the **final-epoch** state to `rqvae_best.pt`. Earlier versions used
+  best-by-`unique_rate`, but the lazy k-means init at epoch 1 sometimes beats
+  every trained epoch on that metric while encoding noise — see Progress.md
+  "Discussion E14".
 
 ### Inference
 
@@ -58,13 +61,15 @@ per item. Beam width 50, no Hamming fallback.
 | Run | R@5 | N@5 | R@10 | N@10 |
 |-----|-----|-----|------|------|
 | SASRec baseline (ours) | 0.0358 | 0.0180 | 0.0573 | 0.0250 |
-| **Ours (nomic + RQ-VAE 3kep + T5)** | **0.0369** | **0.0242** | **0.0589** | **0.0312** |
+| Random ID baseline (4-token random, same T5) | 0.0258 | 0.0174 | 0.0394 | 0.0218 |
+| **Ours (6-field nomic + RQ-VAE 3kep + T5)** | **0.0384** | **0.0256** | **0.0604** | **0.0326** |
 | TIGER (paper) | 0.0454 | 0.0321 | 0.0648 | 0.0384 |
 | TIGER (community reimpl) | — | — | 0.0594 | 0.0321 |
 
-Generative NDCG@10 is **+24.8%** over SASRec. Ours is within split noise of
-the community TIGER reimplementation. See [Progress.md](./Progress.md) for
-the tech-selection narrative.
+Ours surpasses the community TIGER reimplementation by +1.7% R@10. NDCG@10 is
+**+30.4%** over SASRec and **+50%** over the random-ID baseline, isolating the
+contribution of semantic structure on top of the autoregressive backbone. See
+[Progress.md](./Progress.md) for the tech-selection narrative.
 
 ## Dataset
 
