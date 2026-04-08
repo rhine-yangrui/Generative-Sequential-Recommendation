@@ -27,15 +27,15 @@ Headline numbers for the Semantic-ID generative model:
 - **+50 % NDCG@10 over a same-architecture random-ID baseline** — isolates the contribution of *semantic* structure on top of the autoregressive backbone, which is itself non-trivially strong (random-ID R@10 = 0.0394, well above any popularity baseline).
 - The remaining gap to the original paper's reported numbers (-7 % R@10) is comparable to the gap between our random-ID baseline and the paper's random baseline (~9 %), suggesting most of the residual difference is split / sampling noise rather than recipe.
 
-## Modifications relative to the original recipe
-
-- **Local item embeddings via Ollama `nomic-embed-text`** instead of pretrained Sentence-T5 — drops the dependency on a hosted service and gives ~100 % codebook usage (vs ~38 % observed when we tried sentence-T5).
-- **6-field item prompt** — `title / brand / category / description[:1000] / price bucket / popularity bucket` — with HTML-entity cleanup and per-field skipping (no `unknown` placeholders), instead of an unstructured concatenation.
-- **Final-epoch RQ-VAE checkpoint** — selecting by codebook collision rate is unsafe for this dataset because the lazy k-means initialisation at epoch 1 reaches a higher unique-rate than any trained epoch while encoding noise. This bug nearly collapses downstream performance to the random-ID baseline; saving the final epoch fixes it.
-- **All-rank validation, not 99-negative validation** — the 99-negative protocol unfairly favours discriminative models when beam search misses; using the same all-rank protocol for both validation and test cuts our val/test gap from −50 % to −34 %.
-- **Constrained beam search with no Hamming fallback** — invalid beams are dropped instead of being projected back to the nearest valid item; the model is held to the same standard as the evaluation.
-
 ## Architecture
+
+<p align="center">
+  <img src="assets/tiger_figure2.png" alt="TIGER generative retrieval overview" width="760"/>
+  <br/>
+  <sub>Figure 2 from Rajput et al., <em>Recommender Systems with Generative Retrieval</em> (NeurIPS 2023) — the two-stage recipe (RQ-VAE Semantic IDs + seq2seq generative decoding) this repository implements.</sub>
+</p>
+
+This repo's concrete pipeline:
 
 ```
 text metadata
@@ -101,6 +101,14 @@ python baseline/sasrec_train.py
 ```
 
 A single Colab notebook (`notebooks/colab_full_pipeline.ipynb`) runs the entire pipeline end-to-end on a fresh GPU runtime.
+
+## Modifications relative to the original recipe
+
+- **Local item embeddings via Ollama `nomic-embed-text`** instead of pretrained Sentence-T5 — drops the dependency on a hosted service and gives ~100 % codebook usage (vs ~38 % observed when we tried sentence-T5).
+- **6-field item prompt** — `title / brand / category / description[:1000] / price bucket / popularity bucket` — with HTML-entity cleanup and per-field skipping (no `unknown` placeholders), instead of an unstructured concatenation.
+- **Final-epoch RQ-VAE checkpoint** — selecting by codebook collision rate is unsafe for this dataset because the lazy k-means initialisation at epoch 1 reaches a higher unique-rate than any trained epoch while encoding noise. This bug nearly collapses downstream performance to the random-ID baseline; saving the final epoch fixes it.
+- **All-rank validation, not 99-negative validation** — the 99-negative protocol unfairly favours discriminative models when beam search misses; using the same all-rank protocol for both validation and test cuts our val/test gap from −50 % to −34 %.
+- **Constrained beam search with no Hamming fallback** — invalid beams are dropped instead of being projected back to the nearest valid item; the model is held to the same standard as the evaluation.
 
 ## References
 
