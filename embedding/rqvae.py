@@ -1,19 +1,23 @@
 """
-Residual-Quantized VAE on the item embeddings.
+Residual-Quantized VAE on the item embeddings — TIGER paper-faithful config.
 
-Architecture:
-  - 5-hidden MLP encoder/decoder, latent dim 32
-  - 3 residual VQ codebooks, each of size 256
-  - Lazy k-means initialisation on the first forward pass
-  - Sinkhorn balanced assignment on the last codebook only
-  - AdamW + linear warmup/decay, 3000 epochs
+Architecture (Rajput et al. 2023, §3.1):
+  - 3 intermediate ReLU layers [512, 256, 128] → 32-d latent
+  - 3 residual VQ codebooks, each of size 256, embedding dim 32
+  - β = 0.25, lazy k-means initialisation on the first forward pass
+  - No Sinkhorn balanced assignment
 
-Save policy: write the **final-epoch** state to ``checkpoints/rqvae_best.pt``.
-We do *not* track best-by-collision: with this dataset and prompt, the
-k-means init at epoch 1 reliably hits a higher unique-rate than any trained
-epoch while encoding noise (downstream R@10 collapses to roughly the random-ID
-baseline). RQ-VAE internal metrics are diagnostic signals, never selection
-criteria — only the downstream metric is trusted.
+Optimisation (paper-faithful):
+  - Adagrad, constant lr = 0.4, batch 1024
+  - 20 000 epochs, no warmup, no weight decay, no LR schedule
+
+Save policy: always write the **final-epoch** state to
+``checkpoints/rqvae_best.pt``. We do *not* track best-by-collision: with this
+dataset and prompt, the k-means init at epoch 1 reliably hits a higher
+unique-rate than any trained epoch while encoding noise (downstream R@10
+collapses to roughly the random-ID baseline). RQ-VAE internal metrics are
+diagnostic signals, never selection criteria — only the downstream metric is
+trusted.
 
     python embedding/rqvae.py
     python embedding/generate_rqvae_ids.py
@@ -27,11 +31,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.cluster import KMeans
 from torch.utils.data import DataLoader, TensorDataset
-from transformers import get_linear_schedule_with_warmup
 
 
-# ── Architecture ─────────────────────────────────────────────────────────
-HIDDEN_LAYERS  = [512, 256, 128, 64]   # encoder hidden sizes (5 hidden total: + e_dim)
+# ── Architecture (TIGER paper §3.1) ──────────────────────────────────────
+HIDDEN_LAYERS  = [512, 256, 128]       # 3 intermediate ReLU layers
 LATENT_DIM     = 32                    # encoder bottleneck = codebook embedding dim
 # Sizes of the 3 learned residual codebooks. The downstream tokenizer adds a
 # 4th collision-resolution code on top of these (see model/tokenizer.py).
@@ -45,16 +48,16 @@ LOSS_TYPE      = 'mse'
 KMEANS_INIT    = True
 KMEANS_ITERS   = 100
 
-# Sinkhorn balanced assignment, only enabled on the last codebook.
-SK_EPSILONS    = [0.0, 0.0, 0.003]
+# Sinkhorn balanced assignment is disabled in the paper-faithful config.
+# (Flip the last entry to e.g. 0.003 to recover the previous behaviour.)
+SK_EPSILONS    = [0.0, 0.0, 0.0]
 SK_ITERS       = 50
 
-# ── Optimisation ─────────────────────────────────────────────────────────
-LR             = 1e-3
-WEIGHT_DECAY   = 1e-4
+# ── Optimisation (TIGER paper §3.1) ──────────────────────────────────────
+LR             = 0.4                   # Adagrad base learning rate
+WEIGHT_DECAY   = 0.0
 BATCH_SIZE     = 1024
-WARMUP_EPOCHS  = 50
-NUM_EPOCHS     = 3000
+NUM_EPOCHS     = 20000
 EVAL_EVERY     = 50
 MAX_GRAD_NORM  = 1.0
 
@@ -333,19 +336,13 @@ def train_rqvae():
     print(model)
     print(f'#parameters: {n_params/1e6:.2f}M\n')
 
-    optimizer = torch.optim.AdamW(
+    # Paper-faithful: Adagrad with constant lr, no weight decay, no schedule.
+    optimizer = torch.optim.Adagrad(
         model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY,
     )
 
-    # Linear warmup → linear decay, stepped per training step.
     steps_per_epoch = len(train_loader)
     total_steps     = NUM_EPOCHS * steps_per_epoch
-    warmup_steps    = WARMUP_EPOCHS * steps_per_epoch
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps,
-    )
 
     ckpt_dir = os.path.join(os.path.dirname(emb_dir), 'checkpoints')
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -353,7 +350,7 @@ def train_rqvae():
     last_unique = None
 
     print(f'Training RQ-VAE for {NUM_EPOCHS} epochs '
-          f'(warmup {WARMUP_EPOCHS} ep, total {total_steps} steps)')
+          f'(Adagrad lr={LR}, total {total_steps} steps)')
     print(f'Sinkhorn epsilons: {SK_EPSILONS}\n')
 
     for epoch in range(1, NUM_EPOCHS + 1):
@@ -373,7 +370,6 @@ def train_rqvae():
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
-            scheduler.step()
 
             epoch_loss  += loss.item()
             epoch_recon += recon.item()
@@ -391,9 +387,8 @@ def train_rqvae():
             usage_str = '  '.join(
                 f'L{i}={u*100:.1f}%' for i, u in enumerate(usages)
             )
-            current_lr = scheduler.get_last_lr()[0]
             print(
-                f'Epoch {epoch:4d}  lr={current_lr:.2e}  '
+                f'Epoch {epoch:4d}  '
                 f'loss={avg_loss:.4f}  recon={avg_recon:.4f}  rq={avg_quant:.4f}  '
                 f'unique={unique*100:.1f}%  usage: {usage_str}'
             )

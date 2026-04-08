@@ -11,7 +11,10 @@ constrained to legal tokens per step (see ``model/inference.py``).
 
 from itertools import accumulate
 
-K_LEVELS = [256, 256, 256, 64]
+# c0/c1/c2: 3 RQ-VAE codebooks. c3: collision-resolution code, sized to match
+# the codebooks so the per-level layout is uniform (the paper has no cap; with
+# 12k items the c3 max is far below 256 anyway).
+K_LEVELS = [256, 256, 256, 256]
 
 # LEVEL_OFFSETS[level] = first flat token id reserved for that level.
 LEVEL_OFFSETS = [0, *accumulate(K_LEVELS)][:-1]
