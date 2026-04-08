@@ -11,10 +11,8 @@ Mirrors `../TIGER/rqvae/{models,trainer,main}.py`:
   - No L2 normalization on input embeddings (this kills the recon signal)
   - No dead-code reset (Sinkhorn is the only balancing mechanism, like TIGER)
 
-Two best checkpoints saved (matching TIGER):
-  - `rqvae_{TAG}_best_loss.pt`      → lowest train loss (recon + quant)
-  - `rqvae_{TAG}_best_collision.pt` → highest unique-rate (= lowest collision)
-generate_rqvae_ids.py defaults to best_collision.
+Best checkpoint (highest unique-rate = lowest collision) saved to
+`checkpoints/rqvae_best.pt`, matching TIGER's generate_code.py default.
 
 Usage:
     python embedding/rqvae.py
@@ -33,34 +31,35 @@ from transformers import get_linear_schedule_with_warmup
 
 
 # ── Architecture (TIGER defaults) ────────────────────────────────────────
-HIDDEN_LAYERS = [512, 256, 128, 64]   # encoder hidden sizes (5 hidden total: + e_dim)
-LATENT_DIM    = 32                     # encoder bottleneck = codebook embedding dim
-K_LEVELS      = [256, 256, 256]        # 3 codebooks of 256
-BETA          = 0.25
+HIDDEN_LAYERS  = [512, 256, 128, 64]   # encoder hidden sizes (5 hidden total: + e_dim)
+LATENT_DIM     = 32                    # encoder bottleneck = codebook embedding dim
+# Sizes of the 3 learned residual codebooks. The downstream tokenizer adds a
+# 4th collision-resolution code on top of these (see model/tokenizer.py).
+CODEBOOK_SIZES = [256, 256, 256]
+BETA           = 0.25
 QUANT_LOSS_WEIGHT = 1.0
-DROPOUT       = 0.0
-USE_BN        = False
-LOSS_TYPE     = 'mse'
+DROPOUT        = 0.0
+USE_BN         = False
+LOSS_TYPE      = 'mse'
 
-KMEANS_INIT   = True
-KMEANS_ITERS  = 100
+KMEANS_INIT    = True
+KMEANS_ITERS   = 100
 
 # Sinkhorn balanced assignment, only enabled on the last codebook (TIGER default)
-SK_EPSILONS = [0.0, 0.0, 0.003]
-SK_ITERS    = 50
+SK_EPSILONS    = [0.0, 0.0, 0.003]
+SK_ITERS       = 50
 
 # ── Optimization ─────────────────────────────────────────────────────────
 LR             = 1e-3
 WEIGHT_DECAY   = 1e-4
 BATCH_SIZE     = 1024
 WARMUP_EPOCHS  = 50         # linear LR warmup (TIGER 'linear' scheduler)
-NUM_EPOCHS     = 3000       # E11b：对齐 TIGER 完整训练时长（E10 证实 3000ep 在 nomic 上带来 +0.008 R@10）
+NUM_EPOCHS     = 3000       # full TIGER schedule; shorter runs leave R@10 on the table
 EVAL_EVERY     = 50         # TIGER default
 MAX_GRAD_NORM  = 1.0
 
 # ── Input / output ───────────────────────────────────────────────────────
-EMBEDDING_FILE = 'item_embeddings_raw_st5.npy'
-OUTPUT_TAG     = 'st5_3kep'
+EMBEDDING_FILE = 'item_embeddings_raw.npy'
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -235,7 +234,7 @@ class RQVAE(nn.Module):
         self.encoder = MLPLayers(encoder_dims, dropout=DROPOUT, bn=USE_BN)
         self.decoder = MLPLayers(decoder_dims, dropout=DROPOUT, bn=USE_BN)
         self.rq = ResidualVectorQuantizer(
-            n_e_list=K_LEVELS,
+            n_e_list=CODEBOOK_SIZES,
             e_dim=LATENT_DIM,
             sk_epsilons=SK_EPSILONS,
             beta=BETA,
@@ -292,8 +291,8 @@ def compute_metrics(model, data_tensor, device):
 
     n_items     = len(all_codes)
     usages      = [
-        len(set(all_codes[:, lvl].tolist())) / K_LEVELS[lvl]
-        for lvl in range(len(K_LEVELS))
+        len(set(all_codes[:, lvl].tolist())) / CODEBOOK_SIZES[lvl]
+        for lvl in range(len(CODEBOOK_SIZES))
     ]
     unique_rate = len({tuple(c) for c in all_codes}) / n_items
     return usages, unique_rate
@@ -351,11 +350,7 @@ def train_rqvae():
 
     ckpt_dir = os.path.join(os.path.dirname(emb_dir), 'checkpoints')
     os.makedirs(ckpt_dir, exist_ok=True)
-    best_loss_path = os.path.join(ckpt_dir, f'rqvae_{OUTPUT_TAG}_best_loss.pt')
-    best_coll_path = os.path.join(ckpt_dir, f'rqvae_{OUTPUT_TAG}_best_collision.pt')
-    final_path     = os.path.join(ckpt_dir, f'rqvae_{OUTPUT_TAG}_final.pt')
-
-    best_loss = float('inf')
+    best_ckpt_path = os.path.join(ckpt_dir, 'rqvae_best.pt')
     best_coll = float('inf')
 
     print(f'开始 RQ-VAE 训练，共 {NUM_EPOCHS} epochs '
@@ -403,51 +398,26 @@ def train_rqvae():
                 f'unique={unique*100:.1f}%  usage: {usage_str}'
             )
 
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                torch.save(
-                    {'state_dict': model.state_dict(),
-                     'epoch': epoch,
-                     'best_loss': best_loss,
-                     'in_dim': in_dim},
-                    best_loss_path,
-                )
-                print(f'  ✓ best_loss ckpt   (loss={best_loss:.4f})')
-
             collision = 1.0 - unique
             if collision < best_coll:
                 best_coll = collision
                 torch.save(
                     {'state_dict': model.state_dict(),
                      'epoch': epoch,
-                     'best_collision_rate': best_coll,
                      'unique_rate': unique,
                      'in_dim': in_dim},
-                    best_coll_path,
+                    best_ckpt_path,
                 )
-                print(f'  ✓ best_collision ckpt (collision={best_coll:.4f})')
+                print(f'  ✓ best ckpt (collision={best_coll:.4f})')
         else:
             print(
                 f'Epoch {epoch:4d}  loss={avg_loss:.4f}  '
                 f'recon={avg_recon:.4f}  rq={avg_quant:.4f}'
             )
 
-    torch.save(
-        {'state_dict': model.state_dict(),
-         'epoch': NUM_EPOCHS,
-         'in_dim': in_dim},
-        final_path,
-    )
-    print(f'\n训练完成')
-    print(f'  best_loss      = {best_loss:.4f}')
-    print(f'  best_collision = {best_coll:.4f}')
-    print(f'Best loss ckpt:      {best_loss_path}')
-    print(f'Best collision ckpt: {best_coll_path}')
-    print(f'Final ckpt:          {final_path}')
-    print(
-        f'\n运行 python embedding/generate_rqvae_ids.py '
-        f'生成 semantic_ids_rqvae_{OUTPUT_TAG}.npy'
-    )
+    print(f'\n训练完成  best_collision={best_coll:.4f}')
+    print(f'Best ckpt: {best_ckpt_path}')
+    print('\n运行 python embedding/generate_rqvae_ids.py 生成 semantic_ids_rqvae.npy')
 
 
 if __name__ == '__main__':

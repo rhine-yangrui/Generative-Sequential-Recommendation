@@ -4,13 +4,14 @@
 用法：
     python train.py
 
-训练完成后模型保存至 checkpoints/best_model_t5_{num_epochs}ep.pt
+训练完成后模型保存至 checkpoints/best_model_t5.pt
 """
 
 import math
 import os
 import pickle
-import random as _random
+import random
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -20,14 +21,14 @@ from model.tokenizer import (
     seq_to_t5_tokens, item_to_tokens, VOCAB_SIZE, PAD_TOKEN, K_LEVELS
 )
 from model.generative_rec import build_model, count_parameters
-from model.inference import build_reverse_index, predict_topk, predict_topk_batch
+from model.inference import build_reverse_index, predict_topk_batch
 
 # ── 超参数（对齐 ../TIGER/model/main.py）─────────────────────────────────
 CONFIG = {
     'maxlen':      20,
-    'batch_size':  512,     # E10 实测 batch 256 只吃到 16/40 GB A100；翻倍到 512 安全
-    'lr':          1e-4,    # 保持 TIGER 原值，不跟着 batch 缩放，维持与 E9/E10 对照
-    'num_epochs':  200,     # 对齐 TIGER；E8 (100ep+cosine) 证明在低 LR 下被截停
+    'batch_size':  512,     # batch 256 只吃 16/40 GB A100；翻倍到 512 仍在显存内
+    'lr':          1e-4,    # TIGER 原值，常数 LR 无 scheduler
+    'num_epochs':  200,     # 对齐 TIGER 完整训练时长
     'val_every':   2,       # 全量 val 较慢，每 2 epoch 评估一次
     'patience':    10,      # 对齐 TIGER
     'val_beam':    30,      # 对齐 TIGER 训练评估 beam_size
@@ -35,15 +36,8 @@ CONFIG = {
 }
 # ─────────────────────────────────────────────────────────────────────────
 
-ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae_st5_3kep.npy'
-
-# Checkpoint 名自动带上 sids 的 tag，避免多套 sids 互相覆盖。
-#   semantic_ids_rqvae_nomic_300ep.npy → '_nomic_300ep' → best_model_t5_200ep_nomic_300ep.pt
-#   semantic_ids_rqvae_nomic_3kep.npy  → '_nomic_3kep'  → best_model_t5_200ep_nomic_3kep.pt
-#   semantic_ids_rqvae_st5_300ep.npy   → '_st5_300ep'   → best_model_t5_200ep_st5_300ep.pt
-#   semantic_ids_rqvae_st5_3kep.npy    → '_st5_3kep'    → best_model_t5_200ep_st5_3kep.pt
-_sid_stem = os.path.splitext(ACTIVE_SEMANTIC_IDS)[0]          # semantic_ids_rqvae_{embed}_{epochs}
-CKPT_TAG  = _sid_stem[len('semantic_ids_rqvae'):]             # '_nomic_3kep' | '_st5_300ep' | ...
+SEMANTIC_IDS_FILE = 'semantic_ids_rqvae.npy'
+CKPT_FILE         = 'checkpoints/best_model_t5.pt'
 
 TARGET_LEN = len(K_LEVELS)
 ENC_LEN    = CONFIG['maxlen'] * TARGET_LEN
@@ -169,7 +163,7 @@ def train():
 
     base_dir     = os.path.dirname(os.path.abspath(__file__))
     data         = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
-    semantic_ids = np.load(os.path.join(base_dir, 'embedding', ACTIVE_SEMANTIC_IDS),
+    semantic_ids = np.load(os.path.join(base_dir, 'embedding', SEMANTIC_IDS_FILE),
                            allow_pickle=True).item()
 
     train_seqs = data['train']
@@ -179,10 +173,6 @@ def train():
     print('构建训练集（滑动窗口增强）...')
     train_dataset = RecDataset(train_seqs, semantic_ids, CONFIG['maxlen'], augment=True)
     print(f'  训练样本数: {len(train_dataset)}')
-
-    print('构建验证集...')
-    val_dataset = RecDataset(val_seqs, semantic_ids, CONFIG['maxlen'], augment=False)
-    print(f'  验证样本数: {len(val_dataset)}')
 
     train_loader = DataLoader(
         train_dataset, batch_size=CONFIG['batch_size'],
@@ -196,11 +186,10 @@ def train():
     print(f'词表大小: {VOCAB_SIZE}')
 
     # 对齐 TIGER：Adam，无 weight_decay，常数 LR（不用 scheduler）
-    # E8 教训：CosineAnnealingLR 把 LR 退到 1e-5 后 val 仍单调上升，纯被掐死
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
 
     os.makedirs(os.path.join(base_dir, 'checkpoints'), exist_ok=True)
-    ckpt_path = os.path.join(base_dir, f'checkpoints/best_model_t5_{CONFIG["num_epochs"]}ep{CKPT_TAG}.pt')
+    ckpt_path = os.path.join(base_dir, CKPT_FILE)
     best_val_ndcg  = 0.0
     patience_count = 0
 
@@ -256,7 +245,7 @@ def train():
 
 
 if __name__ == '__main__':
-    _random.seed(42)
+    random.seed(42)
     np.random.seed(42)
     torch.manual_seed(42)
     train()

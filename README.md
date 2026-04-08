@@ -15,15 +15,15 @@ The repo has three layers of information:
 ### Pipeline
 
 1. `data/data_process.py` → `beauty_data.pkl`
-2. `embedding/extract_embeddings.py` (default `nomic-embed-text`)
-   → `embedding/item_embeddings_raw_nomic.npy`
+2. `embedding/extract_embeddings.py` (`nomic-embed-text` via Ollama)
+   → `embedding/item_embeddings_raw.npy`
 3. `embedding/rqvae.py` trains the RQ-VAE on the nomic embeddings
-   → `checkpoints/rqvae_{embed}_{rqvae_epochs}_best_{loss,collision}.pt`
+   → `checkpoints/rqvae_best.pt`
 4. `embedding/generate_rqvae_ids.py` loads the best checkpoint, runs argmin
    quantization, resolves collisions with a 4th code
-   → `embedding/semantic_ids_rqvae_{embed}_{rqvae_epochs}.npy`
-5. `train.py` trains a from-scratch GPT-2 decoder; early stopping on
-   validation Recall@10 → `checkpoints/best_model.pt`
+   → `embedding/semantic_ids_rqvae.npy`
+5. `train.py` trains a from-scratch T5 encoder-decoder (~4.6M params); early
+   stopping on validation NDCG@10 → `checkpoints/best_model_t5.pt`
 6. `evaluate.py` runs all-rank Recall@K / NDCG@K on the test set.
 
 The `baseline/sasrec_train.py` SASRec baseline is independent of the
@@ -33,48 +33,38 @@ generative path.
 
 `model/tokenizer.py` uses a **4-token Semantic ID** layout:
 
-- `K_LEVELS = [4, 16, 256, 512]`
+- `K_LEVELS = [256, 256, 256, 64]`
 - first 3 levels are RQ-VAE codes; the 4th is collision resolution
-- `seq_to_tokens()` inserts `EOS` between items
+- `seq_to_t5_tokens()` flattens history into encoder input
 - vocab = `sum(K_LEVELS) + 3` (BOS / EOS / PAD)
 
 ### RQ-VAE training (`embedding/rqvae.py`)
 
-- Encoder/decoder MLP, latent dim 32
-- 3 residual VQ levels with K = `[4, 16, 256]`
-- Sinkhorn balanced assignment on L1 / L2 (log-domain, MPS-safe)
-- 50-epoch encoder warmup → k-means init → 300-epoch joint training
-- AdamW + cosine LR + grad clip; periodic dead-code reset
-- Saves the checkpoint with the highest `unique_rate`
+- 5-hidden encoder `[768→512→256→128→64→32]`, latent dim 32
+- 3 residual VQ levels with K = `[256,256,256]`
+- Lazy k-means init at first forward
+- Sinkhorn balanced assignment on the last codebook only (`sk_epsilons=[0,0,0.003]`)
+- AdamW + linear warmup/decay, 3000 epoch
+- Saves the checkpoint with the highest `unique_rate` as `rqvae_best.pt`
 
 ### Inference
 
 `model/inference.py` uses constrained beam search via
 `LevelConstrainedLogitsProcessor`, generating exactly `len(K_LEVELS)` tokens
-per item and falling back to Hamming nearest-neighbor for any unmatched ID.
+per item. Beam width 50, no Hamming fallback.
 
 ## Results
 
-| Run | Recall@5 | NDCG@5 | Recall@10 | NDCG@10 | Notes |
-|-----|----------|--------|-----------|---------|-------|
-| SASRec (TIGER paper) | 0.0387 | 0.0249 | 0.0605 | 0.0318 | reference |
-| TIGER (paper) | 0.0454 | 0.0321 | 0.0648 | 0.0384 | reference |
-| SASRec baseline (ours, latest) | 0.0358 | 0.0180 | 0.0573 | 0.0250 | E3b |
-| Generative + qwen2:7b kmeans `4/64/256` | 0.0197 | 0.0122 | 0.0322 | 0.0162 | E1, archived |
-| Generative + Random ID ablation | 0.0025 | 0.0016 | 0.0042 | 0.0021 | E2, archived |
-| Generative + RQ-VAE `4/16/256` (+c4) | TBD | TBD | TBD | TBD | E4, training in progress |
+| Run | R@5 | N@5 | R@10 | N@10 |
+|-----|-----|-----|------|------|
+| SASRec baseline (ours) | 0.0358 | 0.0180 | 0.0573 | 0.0250 |
+| **Ours (nomic + RQ-VAE 3kep + T5)** | **0.0369** | **0.0242** | **0.0589** | **0.0312** |
+| TIGER (paper) | 0.0454 | 0.0321 | 0.0648 | 0.0384 |
+| TIGER (community reimpl) | — | — | 0.0594 | 0.0321 |
 
-See [Progress.md](./Progress.md) for per-experiment detail.
-
-## Known Issue
-
-The current RQ-VAE setup `[4,16,256]` only reaches **unique_rate ≈ 41%**
-on Beauty's 12,101 items (max collision group 24). All three codebooks are
-fully used, so this is a capacity ceiling, not collapse: `4 × 16 × 256 = 16384`
-joint slots are too few once the residual quantization is non-uniform.
-See [plan.md](./plan.md) — the
-recommended fix is `K_LEVELS=[256,256,256]` if downstream metrics are
-unsatisfactory.
+Generative NDCG@10 is **+24.8%** over SASRec. Ours is within split noise of
+the community TIGER reimplementation. See [Progress.md](./Progress.md) for
+the tech-selection narrative.
 
 ## Dataset
 

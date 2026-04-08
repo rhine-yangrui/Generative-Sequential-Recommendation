@@ -1,50 +1,68 @@
-import ollama
-import pickle
-import numpy as np
+"""
+Item embedding 提取：用 Ollama 本地推理调用 ``nomic-embed-text``，把每个 item
+的 ``title / category / description`` 拼成 prompt，得到 768 维 embedding。
+
+输入：``data/beauty_data.pkl`` 里的 item 元数据
+输出：``embedding/item_embeddings_raw.npy``  (dict[item_id -> np.ndarray])
+
+支持断点续传：已存在的 embedding 不会重跑，每 500 条落盘一次。
+
+用法：
+    ollama serve &           # 启动后台服务（一次即可）
+    ollama pull nomic-embed-text
+    python embedding/extract_embeddings.py
+"""
+
 import os
+import pickle
+import sys
 import threading
-from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import numpy as np
+import ollama
+from tqdm import tqdm
+
+
+MODEL     = 'nomic-embed-text'   # 768d，instruction-tuned，速度快
+N_WORKERS = 2                    # 并发数：2 个 worker 速度最优，>2 没有额外提升
+SAVE_EVERY = 500                 # 每多少条 embedding 落盘一次（断点续传粒度）
+
+
 def build_item_prompt(meta):
+    """把 item 元数据拼成给 nomic 的 prompt（含 instruction 后缀）。"""
     title = meta.get('title', '')
     description = meta.get('description', '')
     if isinstance(description, list):
         description = ' '.join(description)
     categories = meta.get('categories', [[]])
-    if categories:
-        categories = ' > '.join(categories[0])
-    else:
-        categories = ''
-    return f"""Product: {title}
-Category: {categories}
-Description: {description[:300]}
-
-Represent this product for semantic retrieval."""
+    categories = ' > '.join(categories[0]) if categories else ''
+    return (
+        f"Product: {title}\n"
+        f"Category: {categories}\n"
+        f"Description: {description[:300]}\n\n"
+        "Represent this product for semantic retrieval."
+    )
 
 
-if __name__ == '__main__':
+def extract_all():
     base_dir    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_path   = os.path.join(base_dir, 'data', 'beauty_data.pkl')
-    output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'item_embeddings_raw_nomic.npy')
-
-    # 当前使用 qwen2:7b（3584 维，语义质量更高）
-    # 可替换为更大的 LLM（如 qwen2.5:7b）或轻量模型（nomic-embed-text，768 维）
-    # 换模型只需改这一行，其余代码不用动
-    # MODEL      = 'qwen2:7b'
-    MODEL     = 'nomic-embed-text'   # 速度更快，维度更小（768），适合测试和资源有限的环境
-    N_WORKERS  = 2   # 并发数：2 个 worker 速度最优（~36 分钟），4 个无额外提升
+    output_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'item_embeddings_raw.npy'
+    )
 
     data = pickle.load(open(data_path, 'rb'))
 
-    # 先检查 Ollama 是否可用
+    # 先 ping 一次 Ollama 确认服务可用
     try:
         test_resp = ollama.embeddings(model=MODEL, prompt='test')
-        print(f"Ollama 连接成功，模型: {MODEL}，embedding 维度: {len(test_resp['embedding'])}")
+        print(f"Ollama 连接成功，模型: {MODEL}，"
+              f"embedding 维度: {len(test_resp['embedding'])}")
     except Exception as e:
         print(f"Ollama 连接失败: {e}")
         print(f"请确保已运行: ollama serve 并已拉取模型: ollama pull {MODEL}")
-        exit(1)
+        sys.exit(1)
 
     # 断点续传：如果已有部分结果则继续
     if os.path.exists(output_path):
@@ -53,14 +71,15 @@ if __name__ == '__main__':
     else:
         embeddings = {}
 
-    items_to_process = [(asin, meta) for asin, meta in data['item_metas'].items()
-                        if data['item2id'].get(asin) not in embeddings]
+    items_to_process = [
+        (asin, meta) for asin, meta in data['item_metas'].items()
+        if data['item2id'].get(asin) not in embeddings
+    ]
     print(f"待处理 item 数: {len(items_to_process)}，并发数: {N_WORKERS}")
 
-    # 线程安全的写入锁
-    lock    = threading.Lock()
-    failed  = 0
-    save_counter = [0]  # 用 list 以便在闭包中修改
+    lock         = threading.Lock()
+    failed       = 0
+    save_counter = 0
 
     def fetch_one(args):
         asin, meta = args
@@ -91,9 +110,8 @@ if __name__ == '__main__':
 
             with lock:
                 embeddings[item_id] = emb
-                save_counter[0] += 1
-                # 每 500 个保存一次（断点续传）
-                if save_counter[0] % 500 == 0:
+                save_counter += 1
+                if save_counter % SAVE_EVERY == 0:
                     np.save(output_path, embeddings)
 
         pbar.close()
@@ -101,4 +119,7 @@ if __name__ == '__main__':
     np.save(output_path, embeddings)
     print(f"\nDone: {len(embeddings)} items，失败: {failed} 个")
     print(f"已保存至 {output_path}")
-    # 预期：qwen2:7b，2 workers，~36 分钟，embedding 维度 3584
+
+
+if __name__ == '__main__':
+    extract_all()

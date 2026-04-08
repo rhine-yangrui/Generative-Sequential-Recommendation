@@ -14,9 +14,11 @@
     python evaluate.py
 """
 
-import os
 import math
+import os
 import pickle
+import sys
+
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -27,11 +29,8 @@ from model.inference import build_reverse_index, predict_topk_batch
 K_LIST     = [5, 10]    # 与 TIGER 论文一致：Recall@5, @10, NDCG@5, @10
 BEAM_WIDTH = 50         # beam search 宽度，越大越准但越慢
 BATCH_SIZE = 256        # 批量 beam search（A100 40GB 够；OOM 就降到 128）
-ACTIVE_SEMANTIC_IDS = 'semantic_ids_rqvae_st5_3kep.npy'
-
-# 与 train.py 同步：sids 文件名决定默认 ckpt 后缀
-_sid_stem = os.path.splitext(ACTIVE_SEMANTIC_IDS)[0]
-CKPT_TAG  = _sid_stem[len('semantic_ids_rqvae'):]
+SEMANTIC_IDS_FILE = 'semantic_ids_rqvae.npy'
+DEFAULT_CKPT      = 'checkpoints/best_model_t5.pt'
 
 
 def compute_metrics(recommended_items, target, k_list):
@@ -135,13 +134,11 @@ if __name__ == '__main__':
 
     # 加载数据
     data         = pickle.load(open(os.path.join(base_dir, 'data/beauty_data.pkl'), 'rb'))
-    # Active Semantic ID file: RQ-VAE on top of nomic embeddings.
-    semantic_ids = np.load(os.path.join(base_dir, 'embedding', ACTIVE_SEMANTIC_IDS),
+    semantic_ids = np.load(os.path.join(base_dir, 'embedding', SEMANTIC_IDS_FILE),
                            allow_pickle=True).item()
 
     # 加载模型（可通过命令行参数指定 checkpoint：python evaluate.py checkpoints/xxx.pt）
-    import sys
-    ckpt_rel = sys.argv[1] if len(sys.argv) > 1 else f'checkpoints/best_model_t5_200ep{CKPT_TAG}.pt'
+    ckpt_rel = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CKPT
     ckpt_path = os.path.join(base_dir, ckpt_rel)
     model = build_model().to(device)
     model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
@@ -164,4 +161,4 @@ if __name__ == '__main__':
         beam_width   = BEAM_WIDTH,
     )
 
-    print_results(summary, model_name='Generative Rec (Semantic ID + GPT-2)')
+    print_results(summary, model_name='Generative Rec (Semantic ID + T5)')

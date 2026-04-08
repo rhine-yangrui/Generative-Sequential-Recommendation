@@ -1,14 +1,6 @@
 """
-RQ-VAE ID Generation: loads the best checkpoint and produces a semantic IDs npy.
-
-Loads:  checkpoints/rqvae_{TAG}_{VARIANT}.pt   (TAG from rqvae.OUTPUT_TAG)
-Saves:  embedding/semantic_ids_rqvae_{TAG}[_{VARIANT}].npy
-
-VARIANT defaults to `best_collision` (TIGER-aligned). Pass a different variant
-as the first CLI arg to use another checkpoint, e.g.:
-    python embedding/generate_rqvae_ids.py final
-    python embedding/generate_rqvae_ids.py best_loss
-Output filename gets `_{variant}` appended unless variant is `best_collision`.
+RQ-VAE ID Generation: loads checkpoints/rqvae_best.pt and writes
+embedding/semantic_ids_rqvae.npy.
 
 Each item gets a 4-tuple (c0, c1, c2, c3):
   - c0/c1/c2: learned RQ-VAE codes (ranges 256 / 256 / 256)
@@ -25,19 +17,27 @@ from collections import defaultdict
 import numpy as np
 import torch
 
-# Allow importing sibling module rqvae.py
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Make both the embedding/ package (for `rqvae`) and the project root
+# (for `model.tokenizer`) importable when run as `python embedding/generate_rqvae_ids.py`.
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _THIS_DIR)
+sys.path.insert(0, os.path.dirname(_THIS_DIR))
+
 from rqvae import (
     RQVAE,
-    K_LEVELS,
+    CODEBOOK_SIZES,
     BATCH_SIZE,
     EMBEDDING_FILE,
-    OUTPUT_TAG,
     select_device,
 )
+from model.tokenizer import K_LEVELS as TOKEN_LAYOUT  # 4-token layout incl. c4
 
-# c3 collision-resolution capacity; must match model/tokenizer.py K_LEVELS[3]
-COLLISION_K = 64
+# Single source of truth for the c4 collision-resolution capacity.
+COLLISION_K = TOKEN_LAYOUT[3]
+assert TOKEN_LAYOUT[:3] == CODEBOOK_SIZES, (
+    'tokenizer K_LEVELS[:3] must match rqvae CODEBOOK_SIZES; '
+    f'got {TOKEN_LAYOUT[:3]} vs {CODEBOOK_SIZES}'
+)
 
 
 def resolve_collisions(semantic_ids_raw):
@@ -99,23 +99,15 @@ def generate_ids():
     print(f'加载 embedding: {emb_matrix.shape}')
 
     in_dim = emb_matrix.shape[1]
-    data_tensor = torch.tensor(emb_matrix, dtype=torch.float32, device=device)
+    data_tensor = torch.from_numpy(emb_matrix).to(device)
     n_items = len(data_tensor)
 
-    # Load checkpoint (variant defaults to best_collision, matching TIGER's generate_code.py)
-    variant = sys.argv[1] if len(sys.argv) > 1 else 'best_collision'
-    ckpt_path = os.path.join(
-        proj_dir, 'checkpoints', f'rqvae_{OUTPUT_TAG}_{variant}.pt'
-    )
+    ckpt_path = os.path.join(proj_dir, 'checkpoints', 'rqvae_best.pt')
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     model = RQVAE(in_dim=ckpt.get('in_dim', in_dim)).to(device)
     model.load_state_dict(ckpt['state_dict'])
     model.eval()
-    print(
-        f'加载 checkpoint: {ckpt_path}\n'
-        f'  epoch={ckpt.get("epoch", "?")}  '
-        f'variant={variant}'
-    )
+    print(f'加载 checkpoint: {ckpt_path}  epoch={ckpt.get("epoch", "?")}')
 
     # Extract 3-level codes
     print('提取 Semantic IDs...')
@@ -141,20 +133,16 @@ def generate_ids():
     print(f'解决后唯一 Semantic ID 数: {unique_count} / {len(all_sids)}')
     assert unique_count == len(all_sids), '仍有冲突，请检查 COLLISION_K'
 
-    # Save (append variant suffix unless default best_collision)
-    out_suffix = '' if variant == 'best_collision' else f'_{variant}'
-    output_path = os.path.join(
-        emb_dir, f'semantic_ids_rqvae_{OUTPUT_TAG}{out_suffix}.npy'
-    )
+    output_path = os.path.join(emb_dir, 'semantic_ids_rqvae.npy')
     np.save(output_path, semantic_ids)
     print(f'已保存至 {output_path}')
 
     # Sanity checks
     print('\n--- Sanity Check ---')
     print(f'总 item 数: {len(semantic_ids)}')
-    for lvl in range(len(K_LEVELS)):
+    for lvl in range(len(CODEBOOK_SIZES)):
         used = len({v[lvl] for v in semantic_ids.values()})
-        print(f'c{lvl} 使用码数: {used} / {K_LEVELS[lvl]}')
+        print(f'c{lvl} 使用码数: {used} / {CODEBOOK_SIZES[lvl]}')
     c3_max = max(v[3] for v in semantic_ids.values())
     print(f'c3 最大值: {c3_max}  (容量: {COLLISION_K})')
 

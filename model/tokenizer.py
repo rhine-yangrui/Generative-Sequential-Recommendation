@@ -1,24 +1,25 @@
 """
-Token 词表设计：
-- RQ-VAE 学到的三级 Semantic ID: 256 / 256 / 256
-- 若前三码发生 collision，则追加第 4 个去冲突 token（0~63）
+Token 词表设计
+==============
 
-最终用于生成式模型的 Semantic ID 长度为 4：
-  (c1, c2, c3, c4)
+每个 item 用 4 个 token 表示其 Semantic ID：
 
-其中：
-- c1, c2, c3 由 RQ-VAE 学习得到
-- c4 仅用于 collision resolution；无冲突时统一为 0
-- c4 容量设为 64，与 embedding/generate_rqvae_ids.py 的 COLLISION_K 对齐
+    (c0, c1, c2, c3)
+
+- c0/c1/c2 由 RQ-VAE 学习得到（每级 256 维 codebook）
+- c3 仅用于 collision resolution；无冲突时为 0，c3 容量 64
+
+每一级使用各自独立的 token 区间，所以下游 T5 解码时只要按 level 限制
+合法 token 范围即可（见 ``model/inference.py``）。
 """
+
+from itertools import accumulate
 
 K_LEVELS = [256, 256, 256, 64]
 
-LEVEL_OFFSETS = []
-_offset = 0
-for _k in K_LEVELS:
-    LEVEL_OFFSETS.append(_offset)
-    _offset += _k
+# Cumulative sum of K_LEVELS, used to map (level, code) → flat token id.
+# LEVEL_OFFSETS[level] is the first token id reserved for that level.
+LEVEL_OFFSETS = [0, *accumulate(K_LEVELS)][:-1]
 
 VOCAB_SIZE = sum(K_LEVELS) + 3
 BOS_TOKEN  = sum(K_LEVELS)
@@ -46,11 +47,11 @@ def seq_to_t5_tokens(item_seq, semantic_ids, maxlen=20):
 
     Args:
         item_seq:     用户交互的 item ID 列表
-        semantic_ids: dict，item_id -> (c1, c2, c3, c4)
+        semantic_ids: dict, item_id -> (c0, c1, c2, c3)
         maxlen:       最多保留最近多少个 item
 
     Returns:
-        长度恒为 `maxlen * len(K_LEVELS)` 的 token 列表，左 PAD
+        长度恒为 ``maxlen * len(K_LEVELS)`` 的 token 列表，左 PAD
     """
     tokens = []
     for item_id in item_seq[-maxlen:]:

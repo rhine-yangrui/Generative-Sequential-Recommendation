@@ -1,8 +1,19 @@
-import json
+"""
+Amazon Beauty 5-core 数据处理：从原始 review/meta 文件构建训练所需的
+用户序列、ID 映射和 item 元数据，写入 ``data/beauty_data.pkl``。
+
+输出的 pickle 包含：
+    train / val / test  : dict[user_id -> List[item_id]]，leave-one-out 划分
+    item2id             : dict[asin -> int]，item ID 从 1 开始（0 留给 padding）
+    item_metas          : dict[asin -> meta dict]，用于后续 embedding 提取
+"""
+
 import ast
 import gzip
+import json
 import pickle
 from collections import defaultdict
+
 
 def load_and_process(review_path, meta_path, min_interactions=5):
     # 1. 读取评论
@@ -43,16 +54,16 @@ def load_and_process(review_path, meta_path, min_interactions=5):
         test[u]  = seq        # 训练序列 + 最后一个作为 test target
 
     # 5. 读取 item 元数据（用于 LLM embedding 提取）
-    # meta 文件是 Python dict 格式（单引号），需用 ast.literal_eval 解析
+    # meta 文件是 Python dict 字面量格式（单引号），需用 ast.literal_eval 解析
     item_metas = {}
     with gzip.open(meta_path, 'rb') as f:
         for line in f:
             try:
                 d = ast.literal_eval(line.decode('utf-8'))
-                if d['asin'] in item2id:
-                    item_metas[d['asin']] = d
-            except:
+            except (SyntaxError, ValueError):
                 continue
+            if d.get('asin') in item2id:
+                item_metas[d['asin']] = d
 
     print(f"用户数: {len(train)}, item 数: {len(item2id)}")
     print(f"有元数据的 item 数: {len(item_metas)}")
