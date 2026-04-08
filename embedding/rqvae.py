@@ -350,8 +350,10 @@ def train_rqvae():
 
     ckpt_dir = os.path.join(os.path.dirname(emb_dir), 'checkpoints')
     os.makedirs(ckpt_dir, exist_ok=True)
-    best_ckpt_path = os.path.join(ckpt_dir, 'rqvae_best.pt')
+    best_ckpt_path  = os.path.join(ckpt_dir, 'rqvae_best.pt')
+    final_ckpt_path = os.path.join(ckpt_dir, 'rqvae_final.pt')
     best_coll = float('inf')
+    last_unique = None
 
     print(f'开始 RQ-VAE 训练，共 {NUM_EPOCHS} epochs '
           f'(warmup {WARMUP_EPOCHS} ep, total {total_steps} steps)')
@@ -388,6 +390,7 @@ def train_rqvae():
         is_eval = (epoch == 1 or epoch % EVAL_EVERY == 0 or epoch == NUM_EPOCHS)
         if is_eval:
             usages, unique = compute_metrics(model, data_tensor, device)
+            last_unique = unique
             usage_str = '  '.join(
                 f'L{i}={u*100:.1f}%' for i, u in enumerate(usages)
             )
@@ -415,9 +418,25 @@ def train_rqvae():
                 f'recon={avg_recon:.4f}  rq={avg_quant:.4f}'
             )
 
+    # Always save the final-epoch state alongside best-by-collision so we can
+    # A/B compare downstream. The "best" save criterion (1 - unique_rate) often
+    # locks in the lazy k-means init at epoch 1; the final ckpt lets us check
+    # whether subsequent training actually helps SID quality.
+    torch.save(
+        {'state_dict': model.state_dict(),
+         'epoch': NUM_EPOCHS,
+         'unique_rate': last_unique,
+         'in_dim': in_dim},
+        final_ckpt_path,
+    )
+
     print(f'\n训练完成  best_collision={best_coll:.4f}')
-    print(f'Best ckpt: {best_ckpt_path}')
+    print(f'Best ckpt:  {best_ckpt_path}')
+    print(f'Final ckpt: {final_ckpt_path}  '
+          f'(epoch={NUM_EPOCHS}, unique={last_unique*100:.1f}%)')
     print('\n运行 python embedding/generate_rqvae_ids.py 生成 semantic_ids_rqvae.npy')
+    print('   或 python embedding/generate_rqvae_ids.py --ckpt rqvae_final.pt '
+          '--out semantic_ids_rqvae_final.npy')
 
 
 if __name__ == '__main__':
