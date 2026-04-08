@@ -5,30 +5,36 @@ Random ID baseline：为 thesis 的 null hypothesis 生成随机 4-token ID。
 （拒绝采样；12k item vs 268M 联合槽位，基本不会重试）。与 semantic_ids_rqvae.npy
 完全同 shape，下游 train.py / evaluate.py 通过 --semantic-ids 切换即可。
 
+item 列表直接从 data/beauty_data.pkl 取，不依赖任何 embedding 文件 —— 随机 ID
+baseline 本来就不该碰语义信号。
+
     python embedding/generate_random_ids.py
 """
 
 import os
+import pickle
 import sys
 
 import numpy as np
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(_THIS_DIR))
+_PROJ_DIR = os.path.dirname(_THIS_DIR)
+sys.path.insert(0, _PROJ_DIR)
 
 from model.tokenizer import K_LEVELS
 
 SEED = 42
-EMBEDDING_FILE = 'item_embeddings_raw.npy'
-OUTPUT_FILE    = 'semantic_ids_random.npy'
+DATA_FILE   = os.path.join(_PROJ_DIR, 'data', 'beauty_data.pkl')
+OUTPUT_FILE = 'semantic_ids_random.npy'
 
 
 def generate_random_ids():
     emb_dir = _THIS_DIR
 
-    raw = np.load(os.path.join(emb_dir, EMBEDDING_FILE), allow_pickle=True).item()
-    item_ids = sorted(raw.keys())
-    print(f'item 数: {len(item_ids)}')
+    with open(DATA_FILE, 'rb') as f:
+        data = pickle.load(f)
+    item_ids = sorted(data['item2id'].values())
+    print(f'item 数: {len(item_ids)}  (来源: data/beauty_data.pkl item2id)')
     print(f'K_LEVELS: {K_LEVELS}  联合槽位: {int(np.prod(K_LEVELS)):,}')
 
     rng = np.random.default_rng(SEED)
